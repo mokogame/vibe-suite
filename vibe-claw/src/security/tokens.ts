@@ -1,6 +1,6 @@
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { newId, nowIso } from "../core/ids.js";
-import type { ApiToken, AuthActor } from "../types.js";
+import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID, type ApiToken, type AuthActor, type ResourceScope } from "../types.js";
 import type { Store } from "../store/store.js";
 
 export function hashToken(token: string): string {
@@ -14,9 +14,11 @@ export function createPlainToken(): string {
 export class TokenRegistry {
   constructor(private readonly store: Store) {}
 
-  async registerPlainToken(name: string, token: string, scopes: string[] = ["*"]): Promise<ApiToken> {
+  async registerPlainToken(name: string, token: string, scopes: string[] = ["*"], scope: ResourceScope = {}): Promise<ApiToken> {
     return this.store.addToken({
       id: newId("token"),
+      tenantId: scope.tenantId ?? DEFAULT_TENANT_ID,
+      projectId: scope.projectId ?? DEFAULT_PROJECT_ID,
       tokenHash: hashToken(token),
       name,
       scopes,
@@ -26,9 +28,9 @@ export class TokenRegistry {
     });
   }
 
-  async createToken(name: string, scopes: string[]): Promise<{ token: ApiToken; plainToken: string }> {
+  async createToken(name: string, scopes: string[], scope: ResourceScope = {}): Promise<{ token: ApiToken; plainToken: string }> {
     const plainToken = createPlainToken();
-    const token = await this.registerPlainToken(name, plainToken, scopes);
+    const token = await this.registerPlainToken(name, plainToken, scopes, scope);
     return { token, plainToken };
   }
 
@@ -42,7 +44,13 @@ export class TokenRegistry {
 
     if (!matched || matched.status !== "active") return null;
     if (!hasScope(matched.scopes, requiredScope)) return null;
-    return { tokenId: matched.id, name: matched.name, scopes: matched.scopes };
+    return {
+      tokenId: matched.id,
+      name: matched.name,
+      scopes: matched.scopes,
+      tenantId: matched.tenantId ?? DEFAULT_TENANT_ID,
+      projectId: matched.projectId ?? DEFAULT_PROJECT_ID
+    };
   }
 }
 

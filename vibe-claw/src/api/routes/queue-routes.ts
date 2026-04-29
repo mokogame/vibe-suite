@@ -13,7 +13,8 @@ export async function queueStats({ store, queue }: ApiContext) {
       queued: persisted.filter((task) => task.status === "queued").length,
       running: persisted.filter((task) => task.status === "running").length,
       completed: persisted.filter((task) => task.status === "completed").length,
-      failed: persisted.filter((task) => task.status === "failed").length
+      failed: persisted.filter((task) => task.status === "failed").length,
+      deadLetter: persisted.filter((task) => task.status === "dead_letter").length
     }
   };
 }

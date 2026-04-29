@@ -39,6 +39,7 @@ async function applyIdempotentMaintenance(pool: pg.Pool, sql: string): Promise<v
       const normalized = statement.toLowerCase();
       return (
         normalized.startsWith("create index if not exists") ||
+        normalized.startsWith("create unique index if not exists") ||
         normalized.startsWith("create table if not exists") ||
         /^alter\s+table\s+\S+\s+add\s+column\s+if\s+not\s+exists/.test(normalized)
       );

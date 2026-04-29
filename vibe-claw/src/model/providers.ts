@@ -159,10 +159,20 @@ export function createProviderFromConfig(config: ModelProviderConfig): ModelProv
   if (config.type === "mock") return new MockModelProvider();
   if (config.type === "openai-compatible") {
     const keyName = config.apiKeyRef;
-    const apiKey = keyName ? process.env[keyName] : undefined;
+    const apiKey = keyName ? resolveSecretRef(keyName) : undefined;
     if (!apiKey) throw new ProviderError("upstream_error", `Provider 缺少 API key 环境变量：${keyName ?? "未配置"}`);
     if (!config.baseUrl) throw new ProviderError("upstream_error", "Provider 缺少 baseUrl");
     return new OpenAiCompatibleProvider(config.name, config.baseUrl, apiKey, config.defaultModel, config.maxRetries);
   }
   throw new ProviderError("upstream_error", "不支持的 Provider 类型");
+}
+
+export function resolveSecretRef(ref: string): string | undefined {
+  if (ref.startsWith("env:")) return process.env[ref.slice("env:".length)];
+  if (ref.startsWith("secret://env/")) return process.env[ref.slice("secret://env/".length)];
+  if (ref.startsWith("vault://") || ref.startsWith("kms://")) {
+    const envName = ref.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase();
+    return process.env[envName];
+  }
+  return process.env[ref];
 }

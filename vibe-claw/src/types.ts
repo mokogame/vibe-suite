@@ -15,8 +15,18 @@ export type TokenStatus = "active" | "revoked";
 export type ProviderStatus = "active" | "disabled";
 export type ProviderType = "mock" | "openai-compatible";
 
+export type ResourceScope = {
+  tenantId?: string;
+  projectId?: string;
+};
+
+export const DEFAULT_TENANT_ID = "default";
+export const DEFAULT_PROJECT_ID = "default";
+
 export type Agent = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   name: string;
   description: string;
   instruction: string;
@@ -29,6 +39,8 @@ export type Agent = {
 
 export type AgentRun = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   status: RunStatus;
   input: string;
   output: string | null;
@@ -41,6 +53,8 @@ export type AgentRun = {
 
 export type RunStep = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   runId: string;
   agentId: string;
   status: RunStatus;
@@ -55,6 +69,8 @@ export type RunStep = {
 
 export type RunEvent = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   runId: string;
   stepId: string | null;
   status: RunStatus;
@@ -66,6 +82,8 @@ export type RunEvent = {
 
 export type ModelProviderConfig = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   name: string;
   type: ProviderType;
   status: ProviderStatus;
@@ -80,6 +98,8 @@ export type ModelProviderConfig = {
 
 export type ApiToken = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   tokenHash: string;
   name: string;
   scopes: string[];
@@ -90,6 +110,8 @@ export type ApiToken = {
 
 export type AuditEvent = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   requestId: string;
   actor: string;
   action: string;
@@ -130,6 +152,8 @@ export type AuthActor = {
   tokenId: string;
   name: string;
   scopes: string[];
+  tenantId?: string;
+  projectId?: string;
 };
 
 export type ToolCallInput = {
@@ -157,6 +181,8 @@ export type LeaseStatus = "active" | "expired" | "revoked";
 
 export type AgentMemory = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   agentId: string;
   type: MemoryType;
   scope: MemoryScope;
@@ -172,6 +198,8 @@ export type AgentMemory = {
 
 export type AgentConversation = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   agentId: string;
   mode: ConversationMode;
   status: "active" | "archived";
@@ -182,6 +210,8 @@ export type AgentConversation = {
 
 export type AgentMessage = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   conversationId: string;
   agentId: string;
   role: "user" | "agent" | "system";
@@ -195,6 +225,8 @@ export type AgentMessage = {
 
 export type AgentProtocol = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   agentId: string;
   name: string;
   version: string;
@@ -207,6 +239,8 @@ export type AgentProtocol = {
 
 export type AgentLease = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   agentId: string;
   status: LeaseStatus;
   expiresAt: string;
@@ -222,6 +256,8 @@ export type AgentLease = {
 
 export type RunArtifact = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   runId: string;
   type: "text" | "json";
   name: string;
@@ -231,6 +267,8 @@ export type RunArtifact = {
 
 export type CompressionAudit = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   runId: string | null;
   strategy: CompressionStrategy;
   strategyVersion: string;
@@ -244,14 +282,51 @@ export type CompressionAudit = {
 
 export type RunQueueTask = {
   id: string;
+  tenantId?: string;
+  projectId?: string;
   runId: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "dead_letter";
   requestId: string;
   actor: AuthActor;
   input: CreateRunInput;
   attempts: number;
   lockedAt: string | null;
+  lockedBy?: string | null;
+  lockExpiresAt?: string | null;
+  maxAttempts?: number;
+  nextRunAt?: string | null;
   lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IdempotencyRecord = {
+  id: string;
+  tenantId?: string;
+  projectId?: string;
+  actor: string;
+  method: string;
+  path: string;
+  idempotencyKey: string;
+  bodyHash: string;
+  statusCode: number;
+  responseBody: Record<string, unknown>;
+  expiresAt: string;
+  createdAt: string;
+};
+
+export type WebhookDelivery = {
+  id: string;
+  tenantId?: string;
+  projectId?: string;
+  runId: string;
+  url: string;
+  status: "queued" | "delivered" | "failed" | "dead_letter";
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: string | null;
+  statusCode: number | null;
+  error: string | null;
   createdAt: string;
   updatedAt: string;
 };

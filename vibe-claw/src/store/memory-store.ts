@@ -1,5 +1,6 @@
 import { newId, nowIso } from "../core/ids.js";
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, ModelProviderConfig, RunArtifact, RunEvent, RunQueueTask, RunStep } from "../types.js";
+import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
 import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, Store, UpdateAgentData, UpdateProviderData } from "./store.js";
 import { withoutUndefined } from "./store.js";
 
@@ -23,11 +24,15 @@ export class MemoryStore implements Store {
   private events = new Map<string, RunEvent>();
   private tokens = new Map<string, ApiToken>();
   private audits = new Map<string, AuditEvent>();
+  private idempotencyRecords = new Map<string, IdempotencyRecord>();
+  private conversationLocks = new Map<string, { holder: string; lockUntil: string; tenantId: string; projectId: string }>();
+  private webhookDeliveries = new Map<string, WebhookDelivery>();
 
   async createAgent(data: CreateAgentData): Promise<Agent> {
     const now = nowIso();
     const agent: Agent = {
       id: newId("agent"),
+      ...scopeFrom(data),
       name: data.name,
       description: data.description ?? "",
       instruction: data.instruction,
@@ -62,6 +67,7 @@ export class MemoryStore implements Store {
     const now = nowIso();
     const provider: ModelProviderConfig = {
       id: newId("provider"),
+      ...scopeFrom(data),
       name: data.name,
       type: data.type,
       status: "active",
@@ -95,7 +101,7 @@ export class MemoryStore implements Store {
 
   async createMemory(data: CreateMemoryData): Promise<AgentMemory> {
     const now = nowIso();
-    const memory: AgentMemory = { id: newId("mem"), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
+    const memory: AgentMemory = { id: newId("mem"), ...scopeFrom(data), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
     this.memories.set(memory.id, memory);
     return memory;
   }
@@ -114,7 +120,7 @@ export class MemoryStore implements Store {
 
   async createConversation(data: CreateConversationData): Promise<AgentConversation> {
     const now = nowIso();
-    const conversation: AgentConversation = { id: newId("conv"), agentId: data.agentId, mode: data.mode, status: "active", summary: data.summary ?? "", createdAt: now, updatedAt: now };
+    const conversation: AgentConversation = { id: newId("conv"), ...scopeFrom(data), agentId: data.agentId, mode: data.mode, status: "active", summary: data.summary ?? "", createdAt: now, updatedAt: now };
     this.conversations.set(conversation.id, conversation);
     return conversation;
   }
@@ -127,8 +133,15 @@ export class MemoryStore implements Store {
     return [...this.conversations.values()].filter((item) => !agentId || item.agentId === agentId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  async findConversationByRunId(runId: string): Promise<AgentConversation | null> {
+    const message = [...this.messages.values()]
+      .filter((item) => item.runId === runId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return message ? this.getConversation(message.conversationId) : null;
+  }
+
   async addMessage(data: CreateMessageData): Promise<AgentMessage> {
-    const message: AgentMessage = { id: newId("msg"), runId: data.runId ?? null, inputTokens: data.inputTokens ?? 0, outputTokens: data.outputTokens ?? 0, totalTokens: data.totalTokens ?? 0, createdAt: nowIso(), ...data };
+    const message: AgentMessage = { id: newId("msg"), ...scopeFrom(data), runId: data.runId ?? null, inputTokens: data.inputTokens ?? 0, outputTokens: data.outputTokens ?? 0, totalTokens: data.totalTokens ?? 0, createdAt: nowIso(), ...data };
     this.messages.set(message.id, message);
     const conversation = this.conversations.get(data.conversationId);
     if (conversation) this.conversations.set(conversation.id, { ...conversation, updatedAt: nowIso() });
@@ -141,7 +154,7 @@ export class MemoryStore implements Store {
 
   async createProtocol(data: CreateProtocolData): Promise<AgentProtocol> {
     const now = nowIso();
-    const protocol: AgentProtocol = { id: newId("protocol"), status: "active", createdAt: now, updatedAt: now, ...data };
+    const protocol: AgentProtocol = { id: newId("protocol"), ...scopeFrom(data), status: "active", createdAt: now, updatedAt: now, ...data };
     this.protocols.set(protocol.id, protocol);
     return protocol;
   }
@@ -156,7 +169,7 @@ export class MemoryStore implements Store {
 
   async createLease(data: CreateLeaseData): Promise<AgentLease> {
     const now = nowIso();
-    const lease: AgentLease = { id: newId("lease"), status: "active", usedCalls: 0, usedTokens: 0, createdAt: now, updatedAt: now, ...data };
+    const lease: AgentLease = { id: newId("lease"), ...scopeFrom(data), status: "active", usedCalls: 0, usedTokens: 0, createdAt: now, updatedAt: now, ...data };
     this.leases.set(lease.id, lease);
     return lease;
   }
@@ -178,7 +191,7 @@ export class MemoryStore implements Store {
   }
 
   async addArtifact(data: CreateArtifactData): Promise<RunArtifact> {
-    const artifact: RunArtifact = { id: newId("artifact"), createdAt: nowIso(), ...data };
+    const artifact: RunArtifact = { id: newId("artifact"), ...scopeFrom(data), createdAt: nowIso(), ...data };
     this.artifacts.set(artifact.id, artifact);
     return artifact;
   }
@@ -188,7 +201,7 @@ export class MemoryStore implements Store {
   }
 
   async addCompressionAudit(data: CreateCompressionAuditData): Promise<CompressionAudit> {
-    const audit: CompressionAudit = { id: newId("compress"), runId: data.runId ?? null, createdAt: nowIso(), ...data };
+    const audit: CompressionAudit = { id: newId("compress"), ...scopeFrom(data), runId: data.runId ?? null, createdAt: nowIso(), ...data };
     this.compressionAudits.set(audit.id, audit);
     return audit;
   }
@@ -199,7 +212,7 @@ export class MemoryStore implements Store {
 
   async createQueueTask(data: CreateRunQueueTaskData): Promise<RunQueueTask> {
     const now = nowIso();
-    const task: RunQueueTask = { id: newId("queue"), status: "queued", attempts: 0, lockedAt: null, lastError: null, createdAt: now, updatedAt: now, ...data };
+    const task: RunQueueTask = { id: newId("queue"), ...scopeFrom(data), status: "queued", attempts: 0, lockedAt: null, lockedBy: null, lockExpiresAt: null, maxAttempts: 3, nextRunAt: now, lastError: null, createdAt: now, updatedAt: now, ...data };
     this.queueTasks.set(task.id, task);
     return task;
   }
@@ -216,10 +229,11 @@ export class MemoryStore implements Store {
     return [...this.queueTasks.values()].filter((task) => !statuses || statuses.includes(task.status)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  async createRun(input: string): Promise<AgentRun> {
+  async createRun(input: string, scope: ResourceScope = {}): Promise<AgentRun> {
     const now = nowIso();
     const run: AgentRun = {
       id: newId("run"),
+      ...scopeFrom(scope),
       status: "queued",
       input,
       output: null,
@@ -250,7 +264,7 @@ export class MemoryStore implements Store {
   }
 
   async createStep(data: Omit<RunStep, "id">): Promise<RunStep> {
-    const step = { ...data, id: newId("step") };
+    const step = { tenantId: DEFAULT_TENANT_ID, projectId: DEFAULT_PROJECT_ID, ...data, id: newId("step") };
     this.steps.set(step.id, step);
     return step;
   }
@@ -268,7 +282,7 @@ export class MemoryStore implements Store {
   }
 
   async addEvent(data: Omit<RunEvent, "id" | "createdAt">): Promise<RunEvent> {
-    const event: RunEvent = { ...data, id: newId("event"), createdAt: nowIso() };
+    const event: RunEvent = { tenantId: DEFAULT_TENANT_ID, projectId: DEFAULT_PROJECT_ID, ...data, id: newId("event"), createdAt: nowIso() };
     this.events.set(event.id, event);
     return event;
   }
@@ -308,4 +322,72 @@ export class MemoryStore implements Store {
   async listAuditEvents(): Promise<AuditEvent[]> {
     return [...this.audits.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
+
+  async getIdempotencyRecord(scope: ResourceScope, actor: string, method: string, path: string, key: string): Promise<IdempotencyRecord | null> {
+    return this.idempotencyRecords.get(idempotencyMapKey(scope, actor, method, path, key)) ?? null;
+  }
+
+  async saveIdempotencyRecord(record: IdempotencyRecord): Promise<IdempotencyRecord> {
+    this.idempotencyRecords.set(idempotencyMapKey(record, record.actor, record.method, record.path, record.idempotencyKey), record);
+    return record;
+  }
+
+  async cleanupExpiredIdempotencyRecords(now: string): Promise<number> {
+    let count = 0;
+    for (const [key, record] of this.idempotencyRecords.entries()) {
+      if (record.expiresAt <= now) {
+        this.idempotencyRecords.delete(key);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async acquireConversationLock(scope: ResourceScope, conversationId: string, holder: string, lockUntil: string): Promise<boolean> {
+    const current = this.conversationLocks.get(conversationId);
+    if (current && current.lockUntil > nowIso() && current.holder !== holder) return false;
+    this.conversationLocks.set(conversationId, { ...scopeFrom(scope), holder, lockUntil });
+    return true;
+  }
+
+  async releaseConversationLock(conversationId: string, holder: string): Promise<void> {
+    const current = this.conversationLocks.get(conversationId);
+    if (!current || current.holder === holder) this.conversationLocks.delete(conversationId);
+  }
+
+  async claimQueueTask(workerId: string, lockUntil: string): Promise<RunQueueTask | null> {
+    const now = nowIso();
+    const task = [...this.queueTasks.values()].find((item) => item.status === "queued" && (!item.nextRunAt || item.nextRunAt <= now) && (!item.lockExpiresAt || item.lockExpiresAt <= now));
+    if (!task) return null;
+    const next: RunQueueTask = { ...task, status: "running", attempts: task.attempts + 1, lockedAt: now, lockedBy: workerId, lockExpiresAt: lockUntil, updatedAt: now };
+    this.queueTasks.set(task.id, next);
+    return next;
+  }
+
+  async createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery> {
+    const now = nowIso();
+    const delivery: WebhookDelivery = { id: newId("wh"), createdAt: now, updatedAt: now, ...data };
+    this.webhookDeliveries.set(delivery.id, delivery);
+    return delivery;
+  }
+
+  async updateWebhookDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<WebhookDelivery> {
+    const current = this.webhookDeliveries.get(id);
+    if (!current) throw new Error("Webhook delivery not found: " + id);
+    const next = { ...current, ...withoutUndefined(patch), updatedAt: nowIso() };
+    this.webhookDeliveries.set(id, next);
+    return next;
+  }
+
+  async listWebhookDeliveries(runId?: string): Promise<WebhookDelivery[]> {
+    return [...this.webhookDeliveries.values()].filter((item) => !runId || item.runId === runId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+}
+
+function scopeFrom(value: Partial<ResourceScope>): Required<ResourceScope> {
+  return { tenantId: value.tenantId ?? DEFAULT_TENANT_ID, projectId: value.projectId ?? DEFAULT_PROJECT_ID };
+}
+
+function idempotencyMapKey(scope: ResourceScope, actor: string, method: string, path: string, key: string): string {
+  return [scope.tenantId, scope.projectId, actor, method, path, key].join(":");
 }

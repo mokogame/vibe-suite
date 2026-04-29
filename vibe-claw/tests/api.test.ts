@@ -9,7 +9,8 @@ describe("Vibe Claw API", () => {
     const app = await createServer({ apiToken: "test-token" });
     const response = await app.inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ ok: true, service: "vibe-claw", store: { ok: true, type: "memory" } });
+    expect(response.json()).toMatchObject({ ok: true, service: "vibe-claw", store: { ok: true } });
+    expect(["memory", "postgres"]).toContain(response.json().store.type);
     expect(response.json().queue).toMatchObject({ pending: 0, active: 0 });
   });
 
@@ -495,5 +496,71 @@ describe("runtime provider and persistent queue", () => {
     const queue = await app.inject({ method: "GET", url: "/v1/queue", headers: auth });
     expect(queue.statusCode).toBe(200);
     expect(queue.json().queue.persisted).toBeDefined();
+  });
+});
+
+describe("SaaS/API readiness controls", () => {
+  it("isolates data by tenant/project token ownership", async () => {
+    const app = await createServer({ apiToken: "test-token" });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/v1/tokens",
+      headers: auth,
+      payload: { name: "tenant-a", scopes: ["*"], tenantId: "tenant-a", projectId: "prod" }
+    });
+    expect(createdToken.statusCode).toBe(201);
+    const tenantAuth = { authorization: `Bearer ${createdToken.json().plainToken}` };
+
+    const tenantAgent = await app.inject({ method: "POST", url: "/v1/agents", headers: tenantAuth, payload: { name: "TenantAgent", instruction: "tenant only" } });
+    expect(tenantAgent.statusCode).toBe(201);
+
+    const defaultList = await app.inject({ method: "GET", url: "/v1/agents", headers: auth });
+    expect(defaultList.json().agents.some((agent: { id: string }) => agent.id === tenantAgent.json().agent.id)).toBe(false);
+    const tenantList = await app.inject({ method: "GET", url: "/v1/agents", headers: tenantAuth });
+    expect(tenantList.json().agents.some((agent: { id: string }) => agent.id === tenantAgent.json().agent.id)).toBe(true);
+  });
+
+  it("returns the same response for matching Idempotency-Key and rejects body drift", async () => {
+    const app = await createServer({ apiToken: "test-token" });
+    const key = "idem-create-agent";
+    const first = await app.inject({ method: "POST", url: "/v1/agents", headers: { ...auth, "idempotency-key": key }, payload: { name: "Idem", instruction: "once" } });
+    const second = await app.inject({ method: "POST", url: "/v1/agents", headers: { ...auth, "idempotency-key": key }, payload: { name: "Idem", instruction: "once" } });
+    const drift = await app.inject({ method: "POST", url: "/v1/agents", headers: { ...auth, "idempotency-key": key }, payload: { name: "Idem", instruction: "different" } });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    expect(second.json().agent.id).toBe(first.json().agent.id);
+    expect(drift.statusCode).toBe(409);
+  });
+
+  it("streams agent messages over SSE and persists the final conversation", async () => {
+    const app = await createServer({ apiToken: "test-token" });
+    const agentId = await createAgent(app, "StreamAgent", "stream test");
+    const stream = await app.inject({ method: "POST", url: `/v1/agents/${agentId}/messages/stream`, headers: auth, payload: { message: "hello stream" } });
+    expect(stream.statusCode).toBe(200);
+    expect(stream.headers["content-type"]).toContain("text/event-stream");
+    expect(stream.body).toContain("event: delta");
+    expect(stream.body).toContain("event: done");
+    const conversations = await app.inject({ method: "GET", url: `/v1/agents/${agentId}/conversations`, headers: auth });
+    expect(conversations.json().conversations[0].messageCount).toBe(2);
+  });
+
+  it("records webhook delivery logs and allows manual replay", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+    const app = await createServer({ apiToken: "test-token" });
+    const agentId = await createAgent(app, "WebhookLogAgent", "test");
+    const run = await app.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: auth,
+      payload: { agentIds: [agentId], input: "webhook log", callbackUrl: "https://example.com/webhook", callbackSecret: "super-secret" }
+    });
+    await waitForRun(app, run.json().run.id, "completed");
+    await waitFor(() => fetchMock.mock.calls.length > 0);
+    const deliveries = await app.inject({ method: "GET", url: `/v1/webhook-deliveries?runId=${run.json().run.id}`, headers: auth });
+    expect(deliveries.statusCode).toBe(200);
+    expect(deliveries.json().deliveries[0]).toMatchObject({ runId: run.json().run.id, status: "delivered" });
+    const replay = await app.inject({ method: "POST", url: `/v1/webhook-deliveries/${deliveries.json().deliveries[0].id}/replay`, headers: auth, payload: { secret: "super-secret" } });
+    expect(replay.statusCode).toBe(200);
+    fetchMock.mockRestore();
   });
 });

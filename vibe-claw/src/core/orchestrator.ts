@@ -2,7 +2,7 @@ import { newId, nowIso } from "./ids.js";
 import type { Store } from "../store/store.js";
 import type { ModelProvider } from "../model/providers.js";
 import { ProviderError, estimateTokens } from "../model/providers.js";
-import type { AuthActor, ContextItem, CreateRunInput, RunStatus } from "../types.js";
+import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID, type AuthActor, type ContextItem, type CreateRunInput, type ResourceScope, type RunStatus } from "../types.js";
 import { runTool } from "../tools/registry.js";
 
 const DEFAULT_MODEL_TIMEOUT_MS = 90_000;
@@ -12,11 +12,16 @@ export class Orchestrator {
   constructor(
     private readonly store: Store,
     private readonly provider: ModelProvider,
-    private readonly options: { modelTimeoutMs?: number; contextTokenBudget?: number; resolveProvider?: (providerId: string | undefined, agentProviderId: string | null) => Promise<ModelProvider> } = {}
+    private readonly options: {
+      modelTimeoutMs?: number;
+      contextTokenBudget?: number;
+      resolveProvider?: (providerId: string | undefined, agentProviderId: string | null) => Promise<ModelProvider>;
+      onUsage?: (usage: { actor: AuthActor; agentId: string; provider: string; model: string; totalTokens: number; latencyMs: number }) => Promise<void>;
+    } = {}
   ) {}
 
   async createRun(requestId: string, actor: AuthActor, input: CreateRunInput) {
-    const run = await this.store.createRun(input.input);
+    const run = await this.store.createRun(input.input, { tenantId: actor.tenantId, projectId: actor.projectId });
     await this.audit(requestId, actor.name, "run.create", "run", run.id, "success", {
       agentIds: input.agentIds,
       mode: input.mode ?? "sequential"
@@ -53,7 +58,7 @@ export class Orchestrator {
       for (const agentId of input.agentIds) {
         await this.assertNotCancelled(runId);
         const agent = await this.store.getAgent(agentId);
-        if (!agent || agent.status !== "active") {
+        if (!agent || !sameScope(agent, actor) || agent.status !== "active") {
           throw new RunFailure("invalid_agent", `Agent 不存在或不可用：${agentId}`);
         }
 
@@ -131,6 +136,7 @@ export class Orchestrator {
           latencyMs,
           contextSummary: stepContext.map((item) => `${item.source}:${item.content.slice(0, 80)}`).join(" | ")
         });
+        await this.options.onUsage?.({ actor, agentId: agent.id, provider: result.provider, model: result.model, totalTokens: result.totalTokens, latencyMs });
         await this.audit(requestId, actor.name, "run.step.completed", "step", step.id, "success", {
           agentId: agent.id,
           provider: result.provider,
@@ -238,6 +244,11 @@ export class Orchestrator {
       createdAt: nowIso()
     });
   }
+}
+
+function sameScope(resource: ResourceScope, actor: ResourceScope): boolean {
+  return (resource.tenantId ?? DEFAULT_TENANT_ID) === (actor.tenantId ?? DEFAULT_TENANT_ID)
+    && (resource.projectId ?? DEFAULT_PROJECT_ID) === (actor.projectId ?? DEFAULT_PROJECT_ID);
 }
 
 export class RunFailure extends Error {

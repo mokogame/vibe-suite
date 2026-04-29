@@ -8,6 +8,8 @@ export function scopeFor(method: string, url: string): string {
   if (url.startsWith("/v1/runs")) return method === "GET" ? "runs:read" : "runs:write";
   if (url.startsWith("/v1/providers")) return method === "GET" ? "providers:read" : "providers:write";
   if (url.startsWith("/v1/queue")) return "runs:read";
+  if (url.startsWith("/v1/metrics")) return "audit:read";
+  if (url.startsWith("/v1/webhook-deliveries")) return method === "GET" ? "webhooks:read" : "webhooks:write";
   if (url.startsWith("/v1/tools")) return "tools:read";
   if (url.startsWith("/v1/tokens")) return method === "GET" ? "tokens:read" : "tokens:write";
   if (url.startsWith("/v1/audit-events")) return "audit:read";

@@ -103,7 +103,9 @@ export const createProtocolRunSchema = z.object({
 
 export const createTokenSchema = z.object({
   name: z.string().trim().min(1).max(80),
-  scopes: z.array(z.string().trim().min(1).max(80)).min(1).max(50).default(["*"])
+  scopes: z.array(z.string().trim().min(1).max(80)).min(1).max(50).default(["*"]),
+  tenantId: z.string().trim().min(1).max(120).optional(),
+  projectId: z.string().trim().min(1).max(120).optional()
 });
 
 export function parseBody<T>(schema: z.Schema<T>, body: unknown): T {

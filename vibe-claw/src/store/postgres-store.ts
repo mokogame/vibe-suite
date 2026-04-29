@@ -1,6 +1,7 @@
 import pg from "pg";
 import { newId, nowIso } from "../core/ids.js";
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, ModelProviderConfig, RunArtifact, RunEvent, RunQueueTask, RunStep } from "../types.js";
+import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
 import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, Store, UpdateAgentData, UpdateProviderData } from "./store.js";
 import { withoutUndefined } from "./store.js";
 
@@ -32,6 +33,7 @@ export class PostgresStore implements Store {
     const now = nowIso();
     const agent: Agent = {
       id: newId("agent"),
+      ...scopeFrom(data),
       name: data.name,
       description: data.description ?? "",
       instruction: data.instruction,
@@ -42,9 +44,9 @@ export class PostgresStore implements Store {
       updatedAt: now
     };
     await this.pool.query(
-      `insert into agents (id, name, description, instruction, status, default_model, provider_id, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [agent.id, agent.name, agent.description, agent.instruction, agent.status, agent.defaultModel, agent.providerId, agent.createdAt, agent.updatedAt]
+      `insert into agents (id, tenant_id, project_id, name, description, instruction, status, default_model, provider_id, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [agent.id, agent.tenantId, agent.projectId, agent.name, agent.description, agent.instruction, agent.status, agent.defaultModel, agent.providerId, agent.createdAt, agent.updatedAt]
     );
     return agent;
   }
@@ -75,6 +77,7 @@ export class PostgresStore implements Store {
     const now = nowIso();
     const provider: ModelProviderConfig = {
       id: newId("provider"),
+      ...scopeFrom(data),
       name: data.name,
       type: data.type,
       status: "active",
@@ -87,9 +90,9 @@ export class PostgresStore implements Store {
       updatedAt: now
     };
     await this.pool.query(
-      `insert into model_providers (id, name, type, status, base_url, default_model, api_key_ref, timeout_ms, max_retries, created_at, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [provider.id, provider.name, provider.type, provider.status, provider.baseUrl, provider.defaultModel, provider.apiKeyRef, provider.timeoutMs, provider.maxRetries, provider.createdAt, provider.updatedAt]
+      `insert into model_providers (id, tenant_id, project_id, name, type, status, base_url, default_model, api_key_ref, timeout_ms, max_retries, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [provider.id, provider.tenantId, provider.projectId, provider.name, provider.type, provider.status, provider.baseUrl, provider.defaultModel, provider.apiKeyRef, provider.timeoutMs, provider.maxRetries, provider.createdAt, provider.updatedAt]
     );
     return provider;
   }
@@ -117,11 +120,11 @@ export class PostgresStore implements Store {
 
   async createMemory(data: CreateMemoryData): Promise<AgentMemory> {
     const now = nowIso();
-    const memory: AgentMemory = { id: newId("mem"), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
+    const memory: AgentMemory = { id: newId("mem"), ...scopeFrom(data), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
     await this.pool.query(
-      `insert into agent_memories (id, agent_id, type, scope, status, summary, content, source, source_run_id, created_by, created_at, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [memory.id, memory.agentId, memory.type, memory.scope, memory.status, memory.summary, memory.content, memory.source, memory.sourceRunId, memory.createdBy, memory.createdAt, memory.updatedAt]
+      `insert into agent_memories (id, tenant_id, project_id, agent_id, type, scope, status, summary, content, source, source_run_id, created_by, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [memory.id, memory.tenantId, memory.projectId, memory.agentId, memory.type, memory.scope, memory.status, memory.summary, memory.content, memory.source, memory.sourceRunId, memory.createdBy, memory.createdAt, memory.updatedAt]
     );
     return memory;
   }
@@ -138,8 +141,8 @@ export class PostgresStore implements Store {
 
   async createConversation(data: CreateConversationData): Promise<AgentConversation> {
     const now = nowIso();
-    const conversation: AgentConversation = { id: newId("conv"), agentId: data.agentId, mode: data.mode, status: "active", summary: data.summary ?? "", createdAt: now, updatedAt: now };
-    await this.pool.query(`insert into agent_conversations (id, agent_id, mode, status, summary, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7)`, [conversation.id, conversation.agentId, conversation.mode, conversation.status, conversation.summary, conversation.createdAt, conversation.updatedAt]);
+    const conversation: AgentConversation = { id: newId("conv"), ...scopeFrom(data), agentId: data.agentId, mode: data.mode, status: "active", summary: data.summary ?? "", createdAt: now, updatedAt: now };
+    await this.pool.query(`insert into agent_conversations (id, tenant_id, project_id, agent_id, mode, status, summary, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [conversation.id, conversation.tenantId, conversation.projectId, conversation.agentId, conversation.mode, conversation.status, conversation.summary, conversation.createdAt, conversation.updatedAt]);
     return conversation;
   }
 
@@ -153,9 +156,22 @@ export class PostgresStore implements Store {
     return result.rows.map(rowToConversation);
   }
 
+  async findConversationByRunId(runId: string): Promise<AgentConversation | null> {
+    const result = await this.pool.query(
+      `select c.*
+       from agent_messages m
+       join agent_conversations c on c.id = m.conversation_id
+       where m.run_id=$1
+       order by m.created_at desc
+       limit 1`,
+      [runId]
+    );
+    return result.rows[0] ? rowToConversation(result.rows[0]) : null;
+  }
+
   async addMessage(data: CreateMessageData): Promise<AgentMessage> {
-    const message: AgentMessage = { id: newId("msg"), runId: data.runId ?? null, inputTokens: data.inputTokens ?? 0, outputTokens: data.outputTokens ?? 0, totalTokens: data.totalTokens ?? 0, createdAt: nowIso(), ...data };
-    await this.pool.query(`insert into agent_messages (id, conversation_id, agent_id, role, content, run_id, input_tokens, output_tokens, total_tokens, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [message.id, message.conversationId, message.agentId, message.role, message.content, message.runId, message.inputTokens, message.outputTokens, message.totalTokens, message.createdAt]);
+    const message: AgentMessage = { id: newId("msg"), ...scopeFrom(data), runId: data.runId ?? null, inputTokens: data.inputTokens ?? 0, outputTokens: data.outputTokens ?? 0, totalTokens: data.totalTokens ?? 0, createdAt: nowIso(), ...data };
+    await this.pool.query(`insert into agent_messages (id, tenant_id, project_id, conversation_id, agent_id, role, content, run_id, input_tokens, output_tokens, total_tokens, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [message.id, message.tenantId, message.projectId, message.conversationId, message.agentId, message.role, message.content, message.runId, message.inputTokens, message.outputTokens, message.totalTokens, message.createdAt]);
     await this.pool.query(`update agent_conversations set updated_at=$2 where id=$1`, [message.conversationId, nowIso()]);
     return message;
   }
@@ -167,8 +183,8 @@ export class PostgresStore implements Store {
 
   async createProtocol(data: CreateProtocolData): Promise<AgentProtocol> {
     const now = nowIso();
-    const protocol: AgentProtocol = { id: newId("protocol"), status: "active", createdAt: now, updatedAt: now, ...data };
-    await this.pool.query(`insert into agent_protocols (id, agent_id, name, version, input_schema, output_schema, status, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [protocol.id, protocol.agentId, protocol.name, protocol.version, protocol.inputSchema, protocol.outputSchema, protocol.status, protocol.createdAt, protocol.updatedAt]);
+    const protocol: AgentProtocol = { id: newId("protocol"), ...scopeFrom(data), status: "active", createdAt: now, updatedAt: now, ...data };
+    await this.pool.query(`insert into agent_protocols (id, tenant_id, project_id, agent_id, name, version, input_schema, output_schema, status, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [protocol.id, protocol.tenantId, protocol.projectId, protocol.agentId, protocol.name, protocol.version, protocol.inputSchema, protocol.outputSchema, protocol.status, protocol.createdAt, protocol.updatedAt]);
     return protocol;
   }
 
@@ -184,8 +200,8 @@ export class PostgresStore implements Store {
 
   async createLease(data: CreateLeaseData): Promise<AgentLease> {
     const now = nowIso();
-    const lease: AgentLease = { id: newId("lease"), status: "active", usedCalls: 0, usedTokens: 0, createdAt: now, updatedAt: now, ...data };
-    await this.pool.query(`insert into agent_leases (id, agent_id, status, expires_at, max_calls, used_calls, token_budget, used_tokens, allowed_protocols, created_by, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [lease.id, lease.agentId, lease.status, lease.expiresAt, lease.maxCalls, lease.usedCalls, lease.tokenBudget, lease.usedTokens, lease.allowedProtocols.join(","), lease.createdBy, lease.createdAt, lease.updatedAt]);
+    const lease: AgentLease = { id: newId("lease"), ...scopeFrom(data), status: "active", usedCalls: 0, usedTokens: 0, createdAt: now, updatedAt: now, ...data };
+    await this.pool.query(`insert into agent_leases (id, tenant_id, project_id, agent_id, status, expires_at, max_calls, used_calls, token_budget, used_tokens, allowed_protocols, created_by, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [lease.id, lease.tenantId, lease.projectId, lease.agentId, lease.status, lease.expiresAt, lease.maxCalls, lease.usedCalls, lease.tokenBudget, lease.usedTokens, lease.allowedProtocols.join(","), lease.createdBy, lease.createdAt, lease.updatedAt]);
     return lease;
   }
 
@@ -206,8 +222,8 @@ export class PostgresStore implements Store {
   }
 
   async addArtifact(data: CreateArtifactData): Promise<RunArtifact> {
-    const artifact: RunArtifact = { id: newId("artifact"), createdAt: nowIso(), ...data };
-    await this.pool.query(`insert into run_artifacts (id, run_id, type, name, content, created_at) values ($1,$2,$3,$4,$5,$6)`, [artifact.id, artifact.runId, artifact.type, artifact.name, artifact.content, artifact.createdAt]);
+    const artifact: RunArtifact = { id: newId("artifact"), ...scopeFrom(data), createdAt: nowIso(), ...data };
+    await this.pool.query(`insert into run_artifacts (id, tenant_id, project_id, run_id, type, name, content, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`, [artifact.id, artifact.tenantId, artifact.projectId, artifact.runId, artifact.type, artifact.name, artifact.content, artifact.createdAt]);
     return artifact;
   }
 
@@ -217,9 +233,11 @@ export class PostgresStore implements Store {
   }
 
   async addCompressionAudit(data: CreateCompressionAuditData): Promise<CompressionAudit> {
-    const audit: CompressionAudit = { id: newId("compress"), runId: data.runId ?? null, createdAt: nowIso(), ...data };
-    await this.pool.query(`insert into compression_audits (id, run_id, strategy, strategy_version, original_tokens, compressed_tokens, kept, summarized, dropped, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [
+    const audit: CompressionAudit = { id: newId("compress"), ...scopeFrom(data), runId: data.runId ?? null, createdAt: nowIso(), ...data };
+    await this.pool.query(`insert into compression_audits (id, tenant_id, project_id, run_id, strategy, strategy_version, original_tokens, compressed_tokens, kept, summarized, dropped, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [
       audit.id,
+      audit.tenantId,
+      audit.projectId,
       audit.runId,
       audit.strategy,
       audit.strategyVersion,
@@ -240,8 +258,8 @@ export class PostgresStore implements Store {
 
   async createQueueTask(data: CreateRunQueueTaskData): Promise<RunQueueTask> {
     const now = nowIso();
-    const task: RunQueueTask = { id: newId("queue"), status: "queued", attempts: 0, lockedAt: null, lastError: null, createdAt: now, updatedAt: now, ...data };
-    await this.pool.query(`insert into run_queue_tasks (id, run_id, status, request_id, actor, input, attempts, locked_at, last_error, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [task.id, task.runId, task.status, task.requestId, task.actor, task.input, task.attempts, task.lockedAt, task.lastError, task.createdAt, task.updatedAt]);
+    const task: RunQueueTask = { id: newId("queue"), ...scopeFrom(data), status: "queued", attempts: 0, lockedAt: null, lockedBy: null, lockExpiresAt: null, maxAttempts: 3, nextRunAt: now, lastError: null, createdAt: now, updatedAt: now, ...data };
+    await this.pool.query(`insert into run_queue_tasks (id, tenant_id, project_id, run_id, status, request_id, actor, input, attempts, locked_at, locked_by, lock_expires_at, max_attempts, next_run_at, last_error, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, [task.id, task.tenantId, task.projectId, task.runId, task.status, task.requestId, task.actor, task.input, task.attempts, task.lockedAt, task.lockedBy, task.lockExpiresAt, task.maxAttempts, task.nextRunAt, task.lastError, task.createdAt, task.updatedAt]);
     return task;
   }
 
@@ -249,7 +267,7 @@ export class PostgresStore implements Store {
     const current = (await this.pool.query(`select * from run_queue_tasks where id=$1`, [id])).rows[0];
     if (!current) throw new Error("Queue task not found: " + id);
     const next = { ...rowToQueueTask(current), ...withoutUndefined(patch), updatedAt: nowIso() };
-    await this.pool.query(`update run_queue_tasks set status=$2, request_id=$3, actor=$4, input=$5, attempts=$6, locked_at=$7, last_error=$8, updated_at=$9 where id=$1`, [id, next.status, next.requestId, next.actor, next.input, next.attempts, next.lockedAt, next.lastError, next.updatedAt]);
+    await this.pool.query(`update run_queue_tasks set status=$2, request_id=$3, actor=$4, input=$5, attempts=$6, locked_at=$7, locked_by=$8, lock_expires_at=$9, max_attempts=$10, next_run_at=$11, last_error=$12, updated_at=$13 where id=$1`, [id, next.status, next.requestId, next.actor, next.input, next.attempts, next.lockedAt, next.lockedBy, next.lockExpiresAt, next.maxAttempts, next.nextRunAt, next.lastError, next.updatedAt]);
     return next;
   }
 
@@ -258,10 +276,11 @@ export class PostgresStore implements Store {
     return result.rows.map(rowToQueueTask);
   }
 
-  async createRun(input: string): Promise<AgentRun> {
+  async createRun(input: string, scope: ResourceScope = {}): Promise<AgentRun> {
     const now = nowIso();
     const run: AgentRun = {
       id: newId("run"),
+      ...scopeFrom(scope),
       status: "queued",
       input,
       output: null,
@@ -272,9 +291,9 @@ export class PostgresStore implements Store {
       updatedAt: now
     };
     await this.pool.query(
-      `insert into agent_runs (id, status, input, output, total_tokens, error_type, error_message, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [run.id, run.status, run.input, run.output, run.totalTokens, run.errorType, run.errorMessage, run.createdAt, run.updatedAt]
+      `insert into agent_runs (id, tenant_id, project_id, status, input, output, total_tokens, error_type, error_message, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [run.id, run.tenantId, run.projectId, run.status, run.input, run.output, run.totalTokens, run.errorType, run.errorMessage, run.createdAt, run.updatedAt]
     );
     return run;
   }
@@ -301,11 +320,11 @@ export class PostgresStore implements Store {
   }
 
   async createStep(data: Omit<RunStep, "id">): Promise<RunStep> {
-    const step = { ...data, id: newId("step") };
+    const step = { ...scopeFrom(data), ...data, id: newId("step") };
     await this.pool.query(
-      `insert into agent_run_steps (id, run_id, agent_id, status, input, output, input_tokens, output_tokens, total_tokens, started_at, completed_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [step.id, step.runId, step.agentId, step.status, step.input, step.output, step.inputTokens, step.outputTokens, step.totalTokens, step.startedAt, step.completedAt]
+      `insert into agent_run_steps (id, tenant_id, project_id, run_id, agent_id, status, input, output, input_tokens, output_tokens, total_tokens, started_at, completed_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [step.id, step.tenantId, step.projectId, step.runId, step.agentId, step.status, step.input, step.output, step.inputTokens, step.outputTokens, step.totalTokens, step.startedAt, step.completedAt]
     );
     return step;
   }
@@ -327,11 +346,11 @@ export class PostgresStore implements Store {
   }
 
   async addEvent(data: Omit<RunEvent, "id" | "createdAt">): Promise<RunEvent> {
-    const event: RunEvent = { ...data, id: newId("event"), createdAt: nowIso() };
+    const event: RunEvent = { ...scopeFrom(data), ...data, id: newId("event"), createdAt: nowIso() };
     await this.pool.query(
-      `insert into run_events (id, run_id, step_id, status, title, summary, visible, created_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [event.id, event.runId, event.stepId, event.status, event.title, event.summary, event.visible, event.createdAt]
+      `insert into run_events (id, tenant_id, project_id, run_id, step_id, status, title, summary, visible, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [event.id, event.tenantId, event.projectId, event.runId, event.stepId, event.status, event.title, event.summary, event.visible, event.createdAt]
     );
     return event;
   }
@@ -342,11 +361,12 @@ export class PostgresStore implements Store {
   }
 
   async addToken(token: ApiToken): Promise<ApiToken> {
+    const scoped = scopeFrom(token);
     await this.pool.query(
-      `insert into api_tokens (id, token_hash, name, scopes, status, created_at, revoked_at)
-       values ($1,$2,$3,$4,$5,$6,$7)
+      `insert into api_tokens (id, tenant_id, project_id, token_hash, name, scopes, status, created_at, revoked_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        on conflict (token_hash) do nothing`,
-      [token.id, token.tokenHash, token.name, token.scopes.join(","), token.status, token.createdAt, token.revokedAt]
+      [token.id, scoped.tenantId, scoped.projectId, token.tokenHash, token.name, token.scopes.join(","), token.status, token.createdAt, token.revokedAt]
     );
     return token;
   }
@@ -370,10 +390,11 @@ export class PostgresStore implements Store {
   }
 
   async addAudit(event: AuditEvent): Promise<AuditEvent> {
+    const scoped = scopeFrom(event);
     await this.pool.query(
-      `insert into audit_events (id, request_id, actor, action, target_type, target_id, status, metadata, created_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [event.id, event.requestId, event.actor, event.action, event.targetType, event.targetId, event.status, event.metadata, event.createdAt]
+      `insert into audit_events (id, tenant_id, project_id, request_id, actor, action, target_type, target_id, status, metadata, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [event.id, scoped.tenantId, scoped.projectId, event.requestId, event.actor, event.action, event.targetType, event.targetId, event.status, event.metadata, event.createdAt]
     );
     return event;
   }
@@ -382,50 +403,154 @@ export class PostgresStore implements Store {
     const result = await this.pool.query(`select * from audit_events order by created_at desc`);
     return result.rows.map(rowToAudit);
   }
+
+  async getIdempotencyRecord(scope: ResourceScope, actor: string, method: string, path: string, key: string): Promise<IdempotencyRecord | null> {
+    const scoped = scopeFrom(scope);
+    const result = await this.pool.query(
+      `select * from idempotency_records where tenant_id=$1 and project_id=$2 and actor=$3 and method=$4 and path=$5 and idempotency_key=$6 and expires_at > now()`,
+      [scoped.tenantId, scoped.projectId, actor, method, path, key]
+    );
+    return result.rows[0] ? rowToIdempotency(result.rows[0]) : null;
+  }
+
+  async saveIdempotencyRecord(record: IdempotencyRecord): Promise<IdempotencyRecord> {
+    const scoped = scopeFrom(record);
+    await this.pool.query(
+      `insert into idempotency_records (id, tenant_id, project_id, actor, method, path, idempotency_key, body_hash, status_code, response_body, expires_at, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       on conflict (tenant_id, project_id, actor, method, path, idempotency_key) do nothing`,
+      [record.id, scoped.tenantId, scoped.projectId, record.actor, record.method, record.path, record.idempotencyKey, record.bodyHash, record.statusCode, record.responseBody, record.expiresAt, record.createdAt]
+    );
+    return record;
+  }
+
+  async cleanupExpiredIdempotencyRecords(now: string): Promise<number> {
+    const result = await this.pool.query(`delete from idempotency_records where expires_at <= $1`, [now]);
+    return result.rowCount ?? 0;
+  }
+
+  async acquireConversationLock(scope: ResourceScope, conversationId: string, holder: string, lockUntil: string): Promise<boolean> {
+    const scoped = scopeFrom(scope);
+    const now = nowIso();
+    const result = await this.pool.query(
+      `insert into conversation_locks (conversation_id, tenant_id, project_id, holder, lock_until, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$6)
+       on conflict (conversation_id) do update set holder=$4, lock_until=$5, updated_at=$6
+       where conversation_locks.lock_until <= $6 or conversation_locks.holder = $4
+       returning conversation_id`,
+      [conversationId, scoped.tenantId, scoped.projectId, holder, lockUntil, now]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async releaseConversationLock(conversationId: string, holder: string): Promise<void> {
+    await this.pool.query(`delete from conversation_locks where conversation_id=$1 and holder=$2`, [conversationId, holder]);
+  }
+
+  async claimQueueTask(workerId: string, lockUntil: string): Promise<RunQueueTask | null> {
+    const result = await this.pool.query(
+      `update run_queue_tasks
+       set status='running', attempts=attempts+1, locked_at=now(), locked_by=$1, lock_expires_at=$2, updated_at=now()
+       where id = (
+         select id from run_queue_tasks
+         where status='queued'
+           and (next_run_at is null or next_run_at <= now())
+           and (lock_expires_at is null or lock_expires_at <= now())
+         order by created_at asc
+         for update skip locked
+         limit 1
+       )
+       returning *`,
+      [workerId, lockUntil]
+    );
+    return result.rows[0] ? rowToQueueTask(result.rows[0]) : null;
+  }
+
+  async createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery> {
+    const now = nowIso();
+    const delivery: WebhookDelivery = { id: newId("wh"), createdAt: now, updatedAt: now, ...data };
+    const scoped = scopeFrom(delivery);
+    await this.pool.query(
+      `insert into webhook_deliveries (id, tenant_id, project_id, run_id, url, status, attempts, max_attempts, next_attempt_at, status_code, error, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [delivery.id, scoped.tenantId, scoped.projectId, delivery.runId, delivery.url, delivery.status, delivery.attempts, delivery.maxAttempts, delivery.nextAttemptAt, delivery.statusCode, delivery.error, delivery.createdAt, delivery.updatedAt]
+    );
+    return delivery;
+  }
+
+  async updateWebhookDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<WebhookDelivery> {
+    const current = (await this.pool.query(`select * from webhook_deliveries where id=$1`, [id])).rows[0];
+    if (!current) throw new Error("Webhook delivery not found: " + id);
+    const next = { ...rowToWebhookDelivery(current), ...withoutUndefined(patch), updatedAt: nowIso() };
+    await this.pool.query(
+      `update webhook_deliveries set status=$2, attempts=$3, max_attempts=$4, next_attempt_at=$5, status_code=$6, error=$7, updated_at=$8 where id=$1`,
+      [id, next.status, next.attempts, next.maxAttempts, next.nextAttemptAt, next.statusCode, next.error, next.updatedAt]
+    );
+    return next;
+  }
+
+  async listWebhookDeliveries(runId?: string): Promise<WebhookDelivery[]> {
+    const result = runId ? await this.pool.query(`select * from webhook_deliveries where run_id=$1 order by created_at desc`, [runId]) : await this.pool.query(`select * from webhook_deliveries order by created_at desc`);
+    return result.rows.map(rowToWebhookDelivery);
+  }
 }
 
 function iso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
 
+function scopeFrom(value: Partial<ResourceScope>): Required<ResourceScope> {
+  return { tenantId: value.tenantId ?? DEFAULT_TENANT_ID, projectId: value.projectId ?? DEFAULT_PROJECT_ID };
+}
 
-
+function rowScope(row: Record<string, unknown>): Required<ResourceScope> {
+  return { tenantId: String(row.tenant_id ?? DEFAULT_TENANT_ID), projectId: String(row.project_id ?? DEFAULT_PROJECT_ID) };
+}
 
 function rowToQueueTask(row: Record<string, unknown>): RunQueueTask {
-  return { id: String(row.id), runId: String(row.run_id), status: row.status as RunQueueTask["status"], requestId: String(row.request_id), actor: row.actor as RunQueueTask["actor"], input: row.input as RunQueueTask["input"], attempts: Number(row.attempts), lockedAt: row.locked_at === null ? null : iso(row.locked_at), lastError: row.last_error === null ? null : String(row.last_error), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return { id: String(row.id), tenantId: String(row.tenant_id ?? DEFAULT_TENANT_ID), projectId: String(row.project_id ?? DEFAULT_PROJECT_ID), runId: String(row.run_id), status: row.status as RunQueueTask["status"], requestId: String(row.request_id), actor: row.actor as RunQueueTask["actor"], input: row.input as RunQueueTask["input"], attempts: Number(row.attempts), lockedAt: row.locked_at === null ? null : iso(row.locked_at), lockedBy: row.locked_by === null || row.locked_by === undefined ? null : String(row.locked_by), lockExpiresAt: row.lock_expires_at === null || row.lock_expires_at === undefined ? null : iso(row.lock_expires_at), maxAttempts: Number(row.max_attempts ?? 3), nextRunAt: row.next_run_at === null || row.next_run_at === undefined ? null : iso(row.next_run_at), lastError: row.last_error === null ? null : String(row.last_error), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+}
+
+function rowToIdempotency(row: Record<string, unknown>): IdempotencyRecord {
+  return { id: String(row.id), tenantId: String(row.tenant_id ?? DEFAULT_TENANT_ID), projectId: String(row.project_id ?? DEFAULT_PROJECT_ID), actor: String(row.actor), method: String(row.method), path: String(row.path), idempotencyKey: String(row.idempotency_key), bodyHash: String(row.body_hash), statusCode: Number(row.status_code), responseBody: (row.response_body ?? {}) as Record<string, unknown>, expiresAt: iso(row.expires_at), createdAt: iso(row.created_at) };
+}
+
+function rowToWebhookDelivery(row: Record<string, unknown>): WebhookDelivery {
+  return { id: String(row.id), tenantId: String(row.tenant_id ?? DEFAULT_TENANT_ID), projectId: String(row.project_id ?? DEFAULT_PROJECT_ID), runId: String(row.run_id), url: String(row.url), status: row.status as WebhookDelivery["status"], attempts: Number(row.attempts), maxAttempts: Number(row.max_attempts), nextAttemptAt: row.next_attempt_at === null ? null : iso(row.next_attempt_at), statusCode: row.status_code === null ? null : Number(row.status_code), error: row.error === null ? null : String(row.error), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
 function rowToMemory(row: Record<string, unknown>): AgentMemory {
-  return { id: String(row.id), agentId: String(row.agent_id), type: row.type as AgentMemory["type"], scope: row.scope as AgentMemory["scope"], status: row.status as AgentMemory["status"], summary: String(row.summary), content: String(row.content), source: String(row.source), sourceRunId: row.source_run_id === null ? null : String(row.source_run_id), createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return { id: String(row.id), ...rowScope(row), agentId: String(row.agent_id), type: row.type as AgentMemory["type"], scope: row.scope as AgentMemory["scope"], status: row.status as AgentMemory["status"], summary: String(row.summary), content: String(row.content), source: String(row.source), sourceRunId: row.source_run_id === null ? null : String(row.source_run_id), createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
 function rowToConversation(row: Record<string, unknown>): AgentConversation {
-  return { id: String(row.id), agentId: String(row.agent_id), mode: row.mode as AgentConversation["mode"], status: row.status as AgentConversation["status"], summary: String(row.summary ?? ""), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return { id: String(row.id), ...rowScope(row), agentId: String(row.agent_id), mode: row.mode as AgentConversation["mode"], status: row.status as AgentConversation["status"], summary: String(row.summary ?? ""), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
 function rowToMessage(row: Record<string, unknown>): AgentMessage {
-  return { id: String(row.id), conversationId: String(row.conversation_id), agentId: String(row.agent_id), role: row.role as AgentMessage["role"], content: String(row.content), runId: row.run_id === null ? null : String(row.run_id), inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens), totalTokens: Number(row.total_tokens), createdAt: iso(row.created_at) };
+  return { id: String(row.id), ...rowScope(row), conversationId: String(row.conversation_id), agentId: String(row.agent_id), role: row.role as AgentMessage["role"], content: String(row.content), runId: row.run_id === null ? null : String(row.run_id), inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens), totalTokens: Number(row.total_tokens), createdAt: iso(row.created_at) };
 }
 
 function rowToProtocol(row: Record<string, unknown>): AgentProtocol {
-  return { id: String(row.id), agentId: String(row.agent_id), name: String(row.name), version: String(row.version), inputSchema: (row.input_schema ?? {}) as Record<string, unknown>, outputSchema: (row.output_schema ?? {}) as Record<string, unknown>, status: row.status as AgentProtocol["status"], createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return { id: String(row.id), ...rowScope(row), agentId: String(row.agent_id), name: String(row.name), version: String(row.version), inputSchema: (row.input_schema ?? {}) as Record<string, unknown>, outputSchema: (row.output_schema ?? {}) as Record<string, unknown>, status: row.status as AgentProtocol["status"], createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
 function rowToLease(row: Record<string, unknown>): AgentLease {
-  return { id: String(row.id), agentId: String(row.agent_id), status: row.status as AgentLease["status"], expiresAt: iso(row.expires_at), maxCalls: Number(row.max_calls), usedCalls: Number(row.used_calls), tokenBudget: Number(row.token_budget), usedTokens: Number(row.used_tokens), allowedProtocols: String(row.allowed_protocols).split(",").filter(Boolean), createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return { id: String(row.id), ...rowScope(row), agentId: String(row.agent_id), status: row.status as AgentLease["status"], expiresAt: iso(row.expires_at), maxCalls: Number(row.max_calls), usedCalls: Number(row.used_calls), tokenBudget: Number(row.token_budget), usedTokens: Number(row.used_tokens), allowedProtocols: String(row.allowed_protocols).split(",").filter(Boolean), createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
 function rowToArtifact(row: Record<string, unknown>): RunArtifact {
-  return { id: String(row.id), runId: String(row.run_id), type: row.type as RunArtifact["type"], name: String(row.name), content: String(row.content), createdAt: iso(row.created_at) };
+  return { id: String(row.id), ...rowScope(row), runId: String(row.run_id), type: row.type as RunArtifact["type"], name: String(row.name), content: String(row.content), createdAt: iso(row.created_at) };
 }
 
 function rowToCompressionAudit(row: Record<string, unknown>): CompressionAudit {
-  return { id: String(row.id), runId: row.run_id === null ? null : String(row.run_id), strategy: row.strategy as CompressionAudit["strategy"], strategyVersion: String(row.strategy_version), originalTokens: Number(row.original_tokens), compressedTokens: Number(row.compressed_tokens), kept: (row.kept ?? []) as string[], summarized: (row.summarized ?? []) as string[], dropped: (row.dropped ?? []) as string[], createdAt: iso(row.created_at) };
+  return { id: String(row.id), ...rowScope(row), runId: row.run_id === null ? null : String(row.run_id), strategy: row.strategy as CompressionAudit["strategy"], strategyVersion: String(row.strategy_version), originalTokens: Number(row.original_tokens), compressedTokens: Number(row.compressed_tokens), kept: (row.kept ?? []) as string[], summarized: (row.summarized ?? []) as string[], dropped: (row.dropped ?? []) as string[], createdAt: iso(row.created_at) };
 }
 
 function rowToProvider(row: Record<string, unknown>): ModelProviderConfig {
   return {
     id: String(row.id),
+    ...rowScope(row),
     name: String(row.name),
     type: row.type as ModelProviderConfig["type"],
     status: row.status as ModelProviderConfig["status"],
@@ -442,6 +567,7 @@ function rowToProvider(row: Record<string, unknown>): ModelProviderConfig {
 function rowToAgent(row: Record<string, unknown>): Agent {
   return {
     id: String(row.id),
+    ...rowScope(row),
     name: String(row.name),
     description: String(row.description ?? ""),
     instruction: String(row.instruction),
@@ -456,6 +582,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
 function rowToRun(row: Record<string, unknown>): AgentRun {
   return {
     id: String(row.id),
+    ...rowScope(row),
     status: row.status as AgentRun["status"],
     input: String(row.input),
     output: row.output === null ? null : String(row.output),
@@ -470,6 +597,7 @@ function rowToRun(row: Record<string, unknown>): AgentRun {
 function rowToStep(row: Record<string, unknown>): RunStep {
   return {
     id: String(row.id),
+    ...rowScope(row),
     runId: String(row.run_id),
     agentId: String(row.agent_id),
     status: row.status as RunStep["status"],
@@ -486,6 +614,7 @@ function rowToStep(row: Record<string, unknown>): RunStep {
 function rowToEvent(row: Record<string, unknown>): RunEvent {
   return {
     id: String(row.id),
+    ...rowScope(row),
     runId: String(row.run_id),
     stepId: row.step_id === null ? null : String(row.step_id),
     status: row.status as RunEvent["status"],
@@ -499,6 +628,7 @@ function rowToEvent(row: Record<string, unknown>): RunEvent {
 function rowToToken(row: Record<string, unknown>): ApiToken {
   return {
     id: String(row.id),
+    ...rowScope(row),
     tokenHash: String(row.token_hash),
     name: String(row.name),
     scopes: String(row.scopes).split(",").filter(Boolean),
@@ -511,6 +641,7 @@ function rowToToken(row: Record<string, unknown>): ApiToken {
 function rowToAudit(row: Record<string, unknown>): AuditEvent {
   return {
     id: String(row.id),
+    ...rowScope(row),
     requestId: String(row.request_id),
     actor: String(row.actor),
     action: String(row.action),

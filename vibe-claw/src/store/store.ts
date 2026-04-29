@@ -1,6 +1,8 @@
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, RunArtifact, RunEvent, RunQueueTask, RunStep } from "../types.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, IdempotencyRecord, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
 
-export type CreateAgentData = {
+export type ScopedCreate = Partial<ResourceScope>;
+
+export type CreateAgentData = ScopedCreate & {
   name: string;
   description?: string;
   instruction: string;
@@ -17,7 +19,7 @@ export type UpdateAgentData = Partial<{
   status: AgentStatus;
 }>;
 
-export type CreateProviderData = {
+export type CreateProviderData = ScopedCreate & {
   name: string;
   type: ProviderType;
   baseUrl?: string | null;
@@ -38,7 +40,7 @@ export type UpdateProviderData = Partial<{
 }>;
 
 
-export type CreateMemoryData = {
+export type CreateMemoryData = ScopedCreate & {
   agentId: string;
   type: MemoryType;
   scope: MemoryScope;
@@ -49,13 +51,13 @@ export type CreateMemoryData = {
   createdBy: string;
 };
 
-export type CreateConversationData = {
+export type CreateConversationData = ScopedCreate & {
   agentId: string;
   mode: "message" | "protocol";
   summary?: string;
 };
 
-export type CreateMessageData = {
+export type CreateMessageData = ScopedCreate & {
   conversationId: string;
   agentId: string;
   role: "user" | "agent" | "system";
@@ -66,7 +68,7 @@ export type CreateMessageData = {
   totalTokens?: number;
 };
 
-export type CreateProtocolData = {
+export type CreateProtocolData = ScopedCreate & {
   agentId: string;
   name: string;
   version: string;
@@ -74,7 +76,7 @@ export type CreateProtocolData = {
   outputSchema: Record<string, unknown>;
 };
 
-export type CreateLeaseData = {
+export type CreateLeaseData = ScopedCreate & {
   agentId: string;
   expiresAt: string;
   maxCalls: number;
@@ -83,7 +85,7 @@ export type CreateLeaseData = {
   createdBy: string;
 };
 
-export type CreateArtifactData = {
+export type CreateArtifactData = ScopedCreate & {
   runId: string;
   type: "text" | "json";
   name: string;
@@ -91,14 +93,14 @@ export type CreateArtifactData = {
 };
 
 
-export type CreateRunQueueTaskData = {
+export type CreateRunQueueTaskData = ScopedCreate & {
   runId: string;
   requestId: string;
   actor: import("../types.js").AuthActor;
   input: import("../types.js").CreateRunInput;
 };
 
-export type CreateCompressionAuditData = {
+export type CreateCompressionAuditData = ScopedCreate & {
   runId?: string | null;
   strategy: CompressionStrategy;
   strategyVersion: string;
@@ -130,6 +132,7 @@ export type Store = {
   createConversation(data: CreateConversationData): Promise<AgentConversation>;
   getConversation(id: string): Promise<AgentConversation | null>;
   listConversations(agentId?: string): Promise<AgentConversation[]>;
+  findConversationByRunId(runId: string): Promise<AgentConversation | null>;
   addMessage(data: CreateMessageData): Promise<AgentMessage>;
   listMessages(conversationId: string): Promise<AgentMessage[]>;
 
@@ -151,7 +154,7 @@ export type Store = {
   updateQueueTask(id: string, patch: Partial<RunQueueTask>): Promise<RunQueueTask>;
   listQueueTasks(statuses?: RunQueueTask["status"][]): Promise<RunQueueTask[]>;
 
-  createRun(input: string): Promise<AgentRun>;
+  createRun(input: string, scope?: ResourceScope): Promise<AgentRun>;
   updateRun(id: string, patch: Partial<AgentRun>): Promise<AgentRun>;
   getRun(id: string): Promise<AgentRun | null>;
   listRuns(): Promise<AgentRun[]>;
@@ -170,6 +173,19 @@ export type Store = {
 
   addAudit(event: AuditEvent): Promise<AuditEvent>;
   listAuditEvents(): Promise<AuditEvent[]>;
+
+  getIdempotencyRecord(scope: ResourceScope, actor: string, method: string, path: string, key: string): Promise<IdempotencyRecord | null>;
+  saveIdempotencyRecord(record: IdempotencyRecord): Promise<IdempotencyRecord>;
+  cleanupExpiredIdempotencyRecords(now: string): Promise<number>;
+
+  acquireConversationLock(scope: ResourceScope, conversationId: string, holder: string, lockUntil: string): Promise<boolean>;
+  releaseConversationLock(conversationId: string, holder: string): Promise<void>;
+
+  claimQueueTask(workerId: string, lockUntil: string): Promise<RunQueueTask | null>;
+
+  createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery>;
+  updateWebhookDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<WebhookDelivery>;
+  listWebhookDeliveries(runId?: string): Promise<WebhookDelivery[]>;
 };
 
 export function withoutUndefined<T extends object>(value: T): Partial<T> {
