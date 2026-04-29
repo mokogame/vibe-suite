@@ -174,5 +174,6 @@ export function resolveSecretRef(ref: string): string | undefined {
     const envName = ref.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase();
     return process.env[envName];
   }
+  if (/^(sk-|vcl_|dsk_)/.test(ref)) return ref;
   return process.env[ref];
 }

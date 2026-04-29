@@ -22,32 +22,35 @@ Vibe Claw 与 Vibe IM 的关系：
 
 ## 当前实现快照
 
-截至 2026-04-29，Vibe Claw 已具备面向正式对外 SaaS/API 服务的最小闭环能力：
+截至 2026-04-29，Vibe Claw 已具备面向正式对外 SaaS/API 服务的最小闭环能力，并已与 `docs/需求文档.md`、`docs/ACCEPTANCE.md`、`docs/api.md`、`docs/developer-api.md`、`README.md` 保持同口径：
 
 - 独立服务：`vibe-claw` 在 `vibe-suite` 仓库内作为独立服务目录交付，拥有独立 Fastify API、后台管理页、迁移、测试和构建命令。
-- 独立数据：支持内存存储和 PostgreSQL 存储，PostgreSQL 迁移已覆盖 Provider、Agent、Run、Conversation、Message、Memory、Lease、Token、Audit、Queue、Webhook、幂等记录和会话锁。
+- 独立数据：支持内存存储和 PostgreSQL 存储；运行时只加载当前选定存储，不在内存和数据库之间迁移或污染数据。PostgreSQL 迁移已覆盖 Provider、Agent、Run、Conversation、Message、Memory、Lease、Token、Audit、Queue、Webhook、幂等记录、会话锁、用量和开发者 API 相关表。
+- 存储运维：后台系统设置支持读取当前运行存储、配置内存/PostgreSQL 模式、保存 `.env.local`、请求服务重启、重置当前运行存储数据；重置只清当前存储业务数据，不切换模式、不迁移数据。
 - 模型接入：支持本地 mock provider、OpenAI-compatible provider、DeepSeek 配置；Provider 通过 `apiKeyRef` 引用密钥，不在后台明文展示。
 - Agent 管理：支持创建、查询、修改、归档 Agent；Agent 可绑定指定 Provider 和默认模型。
 - 普通对话：支持 `POST /v1/agents/:id/messages`，自动保存会话、消息、Run、事件、token 使用和上下文压缩记录。
-- 流式入口：支持 `POST /v1/agents/:id/messages/stream` 的 SSE 事件流，事件包含 `status`、`delta`、`done`、`error`。
+- 流式入口：支持 `POST /v1/agents/:id/messages/stream` 的 SSE 事件流，事件包含 `status`、`conversation`、`user_message_created`、`run_created`、`delta`、`assistant_message_completed`、`done`、`error`。
 - 协议运行：支持注册协议、执行 protocol run、输入 JSON Schema 校验、模型输出 JSON 解析和输出 JSON Schema 校验。
 - 记忆系统：支持 Agent 维度记忆写入、查询、状态更新、作用域隔离和模型上下文注入。
 - 上下文压缩：支持 `none`、`recent_only`、`rolling_summary`、`hybrid`、`protocol_minimal` 等策略，并记录压缩审计。
 - 租约：支持为 Agent 创建租约，租约可绑定过期时间、token 预算和调用限制字段。
+- API token 生命周期：支持创建、查询、撤销、轮换、过期时间、IP allowlist、最后使用时间和最后使用 IP；创建和轮换只返回一次明文 token，列表不暴露 token hash。
 - 多租户隔离：API token 带 `tenantId`、`projectId` 和 scopes；核心资源按 tenant/project 过滤，避免不同接入方互相读取。
 - 幂等治理：Agent、Provider、Token、Run、Message、Memory、Lease 等关键写入路径支持 `Idempotency-Key`，相同 key 与不同 body 会返回冲突。
 - 并发治理：同一 conversation 发送消息时使用会话锁，避免并发写入同一会话造成历史错乱；不同 Agent、不同会话可并行处理。
 - 队列治理：异步 Run 进入队列，PostgreSQL 模式支持 claim/lease、锁过期、重试、退避和 `dead_letter`。
-- Webhook：支持 Run 完成后的 webhook 投递、HMAC 签名、投递日志、失败重试、`dead_letter` 和手动 replay。
-- 限流与配额：支持请求窗口限流、单 token 并发限制、日 token 配额和月成本预算；当前运行时计数在进程内维护，持久化聚合表结构已预留。
-- 审计与观测：支持审计事件、结构化请求日志、Run 事件、基础 `/v1/metrics` 指标和后台 API 响应面板。
-- 后台管理：支持模型配置、Agent 管理、Agent 对话页、Agent 记忆页、调用记录、Token/租约、审计、概览和 API 访问令牌弹窗管理。
+- Webhook：支持 Run callback、Webhook 订阅、HMAC 签名、投递日志、失败重试、`dead_letter` 和手动 replay。
+- 用量与计费视图：支持 `/v1/usage`、`/v1/billing`、usage counter 持久化聚合、基础套餐/账单摘要；运行时强限额仍以进程内计数为主。
+- 审计与观测：支持审计事件、结构化请求日志、Run 事件、基础 `/v1/metrics`、Prometheus `/v1/metrics/prometheus`、版本 `/v1/version`、开发者文档索引 `/v1/developer-docs` 和后台 API 响应面板。
+- 开发者接入：支持 OpenAPI JSON、Node SDK、Python SDK、开发者文档索引、API 版本和兼容策略、错误结构归一、Webhook 订阅和工具列表 `/v1/tools`。
+- 后台管理：支持概览、模型配置、Agent 管理、Agent 对话页、Agent 记忆页、调用记录、Token/租约、系统设置、开发者、审计、访问令牌弹窗、API 响应面板和危险操作自定义确认弹窗。Agent 对话页采用成熟聊天产品策略：本地乐观消息、Agent 思考占位、SSE 增量更新、成功后清空输入、失败后恢复原文、只在接近底部时自动跟随滚动。
 
 当前明确边界：
 
 - 多 Agent 在同一个 Run 内仍以确定性顺序执行为主，尚未实现复杂并行 DAG、条件分支编排和自动 handoff。
-- SSE 已提供稳定事件流入口，当前通过普通消息闭环完成持久化后分片输出；上游 provider 原生 token 级透传是后续增强。
-- 用量和成本限制当前为进程内运行时计数；多实例全局配额需要接入持久化 usage 聚合。
+- SSE 已提供稳定事件流入口和后台实时对话体验；上游 provider 原生 token 级透传、暂停/恢复/取消流仍是后续增强。
+- 用量与成本已有持久化聚合查询；多实例全局强限额、跨实例并发控制和真实账单扣费仍需生产级配额服务或集中化限流组件。
 - `secret://env`、`vault://`、`kms://` 等密钥引用已具备解析桥接，但真实 Vault/KMS SDK 集成属于部署增强。
 - Agent 独立版本表、灰度发布、完整 Provider 熔断/健康路由、自动评测质量门禁仍属于后续增强。
 
@@ -408,7 +411,7 @@ working_memory      当前会话临时工作记忆
 - 普通消息调用会组合 Agent instruction、历史消息、外部 context、附件文本摘要和 Agent 记忆。
 - 支持通过 `compression` 参数选择上下文压缩策略。
 - 支持 conversation 级历史续聊，历史消息按时间恢复。
-- 支持附件元数据和文本内容作为一次性上下文发送。
+- 支持附件元数据和文本内容作为一次性上下文发送。后台发送成功后清空输入和附件，失败时恢复原输入文本。
 - 协议运行会优先保留协议契约、输入 schema、输出 schema 和输出约束。
 
 上下文组成顺序建议：
@@ -601,6 +604,8 @@ Vibe Claw 已提供面向外部系统的稳定 `/v1` API。后台管理也通过
 ```text
 GET    /health
 GET    /openapi.json
+GET    /admin
+GET    /admin/:section
 GET    /v1/providers
 POST   /v1/providers
 GET    /v1/providers/:id
@@ -630,13 +635,34 @@ POST   /v1/runs/:id/cancel
 GET    /v1/runs/:id/events
 GET    /v1/queue
 GET    /v1/metrics
+GET    /v1/metrics/prometheus
+GET    /v1/version
+GET    /v1/developer-docs
+GET    /v1/usage
+GET    /v1/billing
+GET    /v1/tools
+GET    /v1/webhook-subscriptions
+POST   /v1/webhook-subscriptions
+PATCH  /v1/webhook-subscriptions/:id
 GET    /v1/webhook-deliveries
 POST   /v1/webhook-deliveries/:id/replay
 GET    /v1/tokens
 POST   /v1/tokens
+POST   /v1/tokens/:id/rotate
 POST   /v1/tokens/:id/revoke
 GET    /v1/audit-events
+GET    /v1/admin/storage-config
+POST   /v1/admin/storage-config
+POST   /v1/admin/restart
+POST   /v1/admin/reset-data
 ```
+
+运维 API 语义：
+
+- `/v1/admin/storage-config` 只写入计划配置到 `.env.local`，不会在运行中迁移数据，也不会把内存数据写入数据库。
+- `/v1/admin/restart` 只请求当前进程退出，生产环境必须由 PM2、systemd、Docker、Kubernetes 或 PaaS 进程管理器拉起新进程。
+- `/v1/admin/reset-data` 只重置当前正在运行的存储模式：内存模式清空内存集合，PostgreSQL 模式清空业务表并保留 schema/migration 状态。
+- 从内存切到 PostgreSQL 后，服务完全使用 PostgreSQL 现有数据；从 PostgreSQL 切到内存后，服务从全新内存数据开始。
 
 租用 Agent 的含义：
 
@@ -647,13 +673,17 @@ GET    /v1/audit-events
 API 安全要求：
 
 - 外部 API 必须鉴权。
-- API token 必须可撤销、可轮换、可限制作用域。
+- API token 必须可撤销、可轮换、可限制作用域、可配置过期时间和 IP allowlist。
+- API token 创建和轮换时只返回一次明文 token，后续列表和查询不得返回 token hash 或明文 token。
+- API token 使用时必须记录 last used time 和 last used IP。
 - 敏感请求和模型输出必须记录审计。
 - 不允许未授权读取其他 Agent 的记忆和会话。
 - API token 必须绑定 scopes、tenantId 和 projectId。
 - 写入接口应支持 `Idempotency-Key`，避免客户端超时重试造成重复副作用。
 - 限流、配额和并发超限应返回明确 429 响应。
 - 同一 conversation 的消息写入必须串行化，不允许并发覆盖历史。
+- Webhook 订阅、投递重放、系统设置、服务重启和数据重置必须受 scope 控制。
+- 后台危险操作必须使用自定义确认弹窗，不依赖浏览器系统确认框。
 
 ## 后台管理
 
@@ -661,16 +691,20 @@ API 安全要求：
 
 当前后台页面：
 
+- 概览：只在概览页展示系统摘要、统计卡片、系统状态和快捷操作，其他页面不占用概览布局空间。
 - 模型配置：供应商、模型、密钥引用、启用状态、默认参数。
 - Agent 列表：名称、状态、默认模型、Provider、Instruction 缩略内容、操作按钮。
 - Agent 对话：从 Agent 列表进入，显示历史消息、消息时间、附件、输入框和发送按钮，可继续对话。
 - Agent 记忆：从 Agent 列表进入，查看、创建和管理对应 Agent 的记忆。
-- 会话记录：按对话方式展示完整输入输出，支持最近对话进入。
-- 调用记录：请求、响应、token、耗时、模型、错误、协议校验结果。
-- 记忆管理：查看、创建、归档、禁用记忆。
-- API token / 租约管理：创建、禁用、过期、作用域。
+- 调用记录：请求、响应、token、状态、最近调用时间、关联 Agent、会话入口和协议校验结果。
+- Token / 租约管理：API token 创建、轮换、撤销、过期、作用域、IP allowlist；Agent 租约创建、过期和预算管理。
+- 系统设置：存储模式配置、当前运行存储、计划配置、服务重启、当前存储数据重置。
+- 开发者：OpenAPI、开发者文档索引、版本兼容、Webhook 订阅、用量、账单、Prometheus 指标和工具列表。
+- 审计：后台敏感操作、模型调用、token 操作、webhook 投递等审计事件。
 - 访问令牌：通过菜单入口弹窗配置当前浏览器访问后台 API 的 Bearer token。
-- 概览：只在概览页展示系统摘要和统计卡片，其他页面不占用布局空间。
+- API 响应面板：右下角按需展开，状态持久记忆，复制按钮只在面板打开时显示。
+- 表单校验：保存前统一校验必填、URL、日期和数值字段，不符合时高亮具体字段并阻止提交。
+- 聊天体验：发送后本地立即追加用户消息和 Agent 思考气泡；SSE 返回后更新当前气泡，不重建整页；聊天滚动不会因为状态刷新回到顶部或弹跳。
 
 对话记录展示要求：
 
@@ -685,6 +719,7 @@ API 安全要求：
 - 宽度不足时显示缩略内容。
 - API key、token、密钥引用等敏感字段必须脱敏。
 - 创建和修改操作统一通过按钮入口和弹窗完成。
+- Agent 的会话记录和记忆管理不作为孤立全局页面割裂展示，优先从 Agent 行操作进入对应工作页。
 
 ## 数据库边界
 
@@ -693,24 +728,30 @@ Vibe Claw 必须使用独立数据库或独立 schema，不与 Vibe IM 的用户
 当前核心表/数据集合：
 
 ```text
+schema_migrations
 model_providers
 agents
 agent_memories
 agent_conversations
 agent_messages
-agent_runs
-agent_run_steps
-agent_run_events
 agent_protocols
 agent_leases
-api_tokens
-audit_events
-queue_tasks
+agent_versions
+agent_runs
+agent_run_steps
+run_events
+run_artifacts
+compression_audits
+run_queue_tasks
 idempotency_records
 conversation_locks
-webhook_deliveries
-compression_audits
+api_tokens
+audit_events
 usage_counters
+webhook_subscriptions
+webhook_deliveries
+model_configs
+agent_run_contexts
 ```
 
 数据库原则：
@@ -725,7 +766,10 @@ usage_counters
 
 当前边界：
 
-- `agent_versions`、复杂模型配置版本和长期 usage 聚合已经作为后续演进方向保留，但不应在文档中当作当前已完成能力描述。
+- `schema_migrations` 是迁移状态表，数据重置不得清理该表或破坏已应用 migration。
+- `model_configs`、`agent_versions`、`agent_run_contexts` 已作为 schema 层预留和部分支撑能力存在，但完整产品化流程仍需后续增强。
+- 存储模式切换不做数据迁移：内存模式和 PostgreSQL 模式各自独立，切换后只读取目标存储自己的数据。
+- 数据重置只清理当前运行存储中的业务数据，不改变存储模式，不复制另一种存储的数据。
 
 ## 可靠性要求
 
@@ -741,6 +785,9 @@ usage_counters
 - 写入接口必须支持幂等，避免网络重试造成重复副作用。
 - 同一会话必须通过锁保证消息顺序。
 - 对外错误必须有稳定结构，敏感内部错误需要脱敏。
+- 对外错误响应必须包含稳定 `code`、`message`、`details`、`requestId` 字段。
+- 服务必须暴露基础健康检查、Prometheus 指标、版本信息和开发者文档索引。
+- 服务重启和数据重置是管理员危险操作，必须二次确认、记录审计，并清楚提示部署环境对重启能力的依赖。
 
 ## 当前交付范围
 
@@ -758,17 +805,27 @@ usage_counters
 10. 异步 Run 队列、PostgreSQL claim/lease、重试、退避和 dead letter。
 11. webhook 投递、签名、日志、失败重试和手动重放。
 12. 幂等写入和会话并发锁。
+13. OpenAPI、开发者文档索引、版本信息、Node SDK、Python SDK、API 文档、需求文档、验收文档和错误结构归一。
+14. API token 创建、撤销、轮换、过期、IP allowlist、last used 记录和脱敏展示。
+15. usage counter 持久化聚合、用量查询、基础账单摘要和 Prometheus 指标。
+16. Webhook 订阅、事件匹配、签名投递和投递记录管理。
+17. 后台系统设置、存储模式配置、服务重启和当前存储数据重置。
+18. 工具注册表 `/v1/tools` 和显式工具调用数据结构。
+19. 后台聊天输入框成功发送后自动清空、失败恢复原文、滚动锚定和 Agent 思考态。
+20. 文档口径已对齐：`README.md`、`docs/需求文档.md`、`docs/ACCEPTANCE.md`、`docs/api.md`、`docs/developer-api.md` 与本文档描述一致。
 
 后续增强：
 
 - 多供应商复杂路由。
-- 自动工具调用。
+- 模型驱动的自动工具调用、工具审批流和工具执行沙箱。
 - 多 Agent 自主协作的完整调度器、并行 DAG、条件分支和 handoff。
 - 复杂向量数据库检索。
-- 多实例持久化用量聚合和细粒度计费账单。
+- 多实例全局强限额、分布式并发控制和真实账单扣费。
 - 组织/成员/角色级权限模型。
 - Agent 版本、灰度发布、回滚和评测质量门禁。
 - Provider 熔断、健康探测和成本/延迟自动路由。
+- Vault/KMS 真实 SDK 集成和密钥轮换策略。
+- 云平台 restart hook、滚动重启和后台操作审计报表。
 
 ## 与 Vibe IM 的集成建议
 

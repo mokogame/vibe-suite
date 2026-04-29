@@ -1,7 +1,7 @@
 import { newId, nowIso } from "../core/ids.js";
 import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
-import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, Store, UpdateAgentData, UpdateProviderData } from "./store.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
+import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, CreateUsageCounterData, CreateWebhookSubscriptionData, Store, UpdateAgentData, UpdateProviderData, UpdateWebhookSubscriptionData } from "./store.js";
 import { withoutUndefined } from "./store.js";
 
 export class MemoryStore implements Store {
@@ -26,7 +26,37 @@ export class MemoryStore implements Store {
   private audits = new Map<string, AuditEvent>();
   private idempotencyRecords = new Map<string, IdempotencyRecord>();
   private conversationLocks = new Map<string, { holder: string; lockUntil: string; tenantId: string; projectId: string }>();
+  private usageCounters = new Map<string, UsageCounter>();
+  private webhookSubscriptions = new Map<string, WebhookSubscription>();
   private webhookDeliveries = new Map<string, WebhookDelivery>();
+
+  async resetData() {
+    const collections = [
+      this.agents,
+      this.providers,
+      this.memories,
+      this.conversations,
+      this.messages,
+      this.protocols,
+      this.leases,
+      this.artifacts,
+      this.compressionAudits,
+      this.queueTasks,
+      this.runs,
+      this.steps,
+      this.events,
+      this.tokens,
+      this.audits,
+      this.idempotencyRecords,
+      this.conversationLocks,
+      this.usageCounters,
+      this.webhookSubscriptions,
+      this.webhookDeliveries
+    ];
+    const cleared = collections.reduce((sum, collection) => sum + collection.size, 0);
+    for (const collection of collections) collection.clear();
+    return { storeType: "memory" as const, cleared };
+  }
 
   async createAgent(data: CreateAgentData): Promise<Agent> {
     const now = nowIso();
@@ -306,6 +336,14 @@ export class MemoryStore implements Store {
     return this.tokens.get(id) ?? null;
   }
 
+  async markTokenUsed(id: string, usedAt: string, ip: string | null): Promise<ApiToken | null> {
+    const current = this.tokens.get(id);
+    if (!current) return null;
+    const next = { ...current, lastUsedAt: usedAt, lastUsedIp: ip };
+    this.tokens.set(id, next);
+    return next;
+  }
+
   async revokeToken(id: string, revokedAt: string): Promise<ApiToken | null> {
     const current = this.tokens.get(id);
     if (!current) return null;
@@ -364,6 +402,75 @@ export class MemoryStore implements Store {
     return next;
   }
 
+  async recordUsage(data: CreateUsageCounterData): Promise<UsageCounter> {
+    const scoped = scopeFrom(data);
+    const key = usageMapKey(scoped, data.tokenId ?? null, data.agentId ?? null, data.providerId ?? null, data.usageWindow);
+    const now = nowIso();
+    const current = this.usageCounters.get(key);
+    const next: UsageCounter = current
+      ? {
+          ...current,
+          requestCount: current.requestCount + (data.requestCount ?? 0),
+          tokenCount: current.tokenCount + (data.tokenCount ?? 0),
+          costUnits: current.costUnits + (data.costUnits ?? 0),
+          updatedAt: now
+        }
+      : {
+          id: newId("usage"),
+          ...scoped,
+          tokenId: data.tokenId ?? null,
+          agentId: data.agentId ?? null,
+          providerId: data.providerId ?? null,
+          usageWindow: data.usageWindow,
+          requestCount: data.requestCount ?? 0,
+          tokenCount: data.tokenCount ?? 0,
+          costUnits: data.costUnits ?? 0,
+          createdAt: now,
+          updatedAt: now
+        };
+    this.usageCounters.set(key, next);
+    return next;
+  }
+
+  async listUsageCounters(scope: ResourceScope = {}): Promise<UsageCounter[]> {
+    const scoped = scopeFrom(scope);
+    return [...this.usageCounters.values()]
+      .filter((item) => item.tenantId === scoped.tenantId && item.projectId === scoped.projectId)
+      .sort((a, b) => b.usageWindow.localeCompare(a.usageWindow));
+  }
+
+  async createWebhookSubscription(data: CreateWebhookSubscriptionData): Promise<WebhookSubscription> {
+    const now = nowIso();
+    const subscription: WebhookSubscription = {
+      id: newId("whsub"),
+      ...scopeFrom(data),
+      name: data.name,
+      url: data.url,
+      secretRef: data.secretRef ?? null,
+      eventTypes: data.eventTypes,
+      status: "active",
+      createdAt: now,
+      updatedAt: now
+    };
+    this.webhookSubscriptions.set(subscription.id, subscription);
+    return subscription;
+  }
+
+  async updateWebhookSubscription(id: string, patch: UpdateWebhookSubscriptionData): Promise<WebhookSubscription | null> {
+    const current = this.webhookSubscriptions.get(id);
+    if (!current) return null;
+    const next = { ...current, ...withoutUndefined(patch), updatedAt: nowIso() };
+    this.webhookSubscriptions.set(id, next);
+    return next;
+  }
+
+  async listWebhookSubscriptions(scope: ResourceScope = {}): Promise<WebhookSubscription[]> {
+    const scoped = scopeFrom(scope);
+    return [...this.webhookSubscriptions.values()]
+      .filter((item) => item.tenantId === scoped.tenantId && item.projectId === scoped.projectId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
   async createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery> {
     const now = nowIso();
     const delivery: WebhookDelivery = { id: newId("wh"), createdAt: now, updatedAt: now, ...data };
@@ -390,4 +497,8 @@ function scopeFrom(value: Partial<ResourceScope>): Required<ResourceScope> {
 
 function idempotencyMapKey(scope: ResourceScope, actor: string, method: string, path: string, key: string): string {
   return [scope.tenantId, scope.projectId, actor, method, path, key].join(":");
+}
+
+function usageMapKey(scope: ResourceScope, tokenId: string | null, agentId: string | null, providerId: string | null, window: string): string {
+  return [scope.tenantId, scope.projectId, tokenId ?? "", agentId ?? "", providerId ?? "", window].join(":");
 }

@@ -1,6 +1,10 @@
 import { createHmac } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createServer } from "../src/api/server.js";
+import { MemoryStore } from "../src/store/memory-store.js";
 
 const auth = { authorization: "Bearer test-token" };
 
@@ -22,12 +26,22 @@ describe("Vibe Claw API", () => {
       openapi: "3.1.0",
       info: { title: "Vibe Claw API" }
     });
+    expect(response.json().paths).toHaveProperty("/v1/usage");
+    expect(response.json().paths).toHaveProperty("/v1/billing");
+    expect(response.json().paths).toHaveProperty("/v1/webhook-subscriptions");
+    expect(response.json().paths).toHaveProperty("/v1/admin/reset-data");
+    expect(response.json().components.schemas).toHaveProperty("ErrorResponse");
   });
 
   it("rejects protected API without token", async () => {
     const app = await createServer({ apiToken: "test-token" });
     const response = await app.inject({ method: "GET", url: "/v1/agents" });
     expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({
+      code: "AUTH_MISSING",
+      message: "缺少 Bearer Token",
+      requestId: expect.any(String)
+    });
   });
 
   it("creates and updates provider configs", async () => {
@@ -80,6 +94,91 @@ describe("Vibe Claw API", () => {
     const response = await app.inject({ method: "GET", url: "/v1/queue", headers: auth });
     expect(response.statusCode).toBe(200);
     expect(response.json().queue).toMatchObject({ pending: 0, active: 0 });
+  });
+
+  it("lets admins configure storage mode without exposing database credentials", async () => {
+    const previousPath = process.env.VIBE_CLAW_RUNTIME_CONFIG_PATH;
+    const previousMode = process.env.VIBE_CLAW_STORAGE_MODE;
+    const previousVibeDb = process.env.VIBE_CLAW_DATABASE_URL;
+    const previousDb = process.env.DATABASE_URL;
+    const dir = await mkdtemp(join(tmpdir(), "vibe-claw-config-"));
+    process.env.VIBE_CLAW_RUNTIME_CONFIG_PATH = join(dir, ".env.local");
+    delete process.env.VIBE_CLAW_STORAGE_MODE;
+    delete process.env.VIBE_CLAW_DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      const app = await createServer({ apiToken: "test-token" });
+      const current = await app.inject({ method: "GET", url: "/v1/admin/storage-config", headers: auth });
+      expect(current.statusCode).toBe(200);
+      expect(current.json().config).toMatchObject({ storageMode: "memory", activeStoreType: "memory" });
+
+      const saved = await app.inject({
+        method: "POST",
+        url: "/v1/admin/storage-config",
+        headers: auth,
+        payload: {
+          storageMode: "postgres",
+          databaseUrl: "postgres://admin:secret-pass@localhost:5432/vibe_claw"
+        }
+      });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json().config).toMatchObject({
+        storageMode: "postgres",
+        activeStoreType: "memory",
+        databaseUrlConfigured: true,
+        requiresRestart: true
+      });
+      expect(saved.json().config.databaseUrlMasked).toContain("********");
+      expect(saved.json().config.databaseUrlMasked).not.toContain("secret-pass");
+      await expect(readFile(join(dir, ".env.local"), "utf8")).resolves.toContain("VIBE_CLAW_STORAGE_MODE");
+
+      const restart = await app.inject({ method: "POST", url: "/v1/admin/restart", headers: auth, payload: {} });
+      expect(restart.statusCode).toBe(200);
+      expect(restart.json()).toMatchObject({ restartScheduled: false });
+    } finally {
+      if (previousPath === undefined) delete process.env.VIBE_CLAW_RUNTIME_CONFIG_PATH;
+      else process.env.VIBE_CLAW_RUNTIME_CONFIG_PATH = previousPath;
+      if (previousMode === undefined) delete process.env.VIBE_CLAW_STORAGE_MODE;
+      else process.env.VIBE_CLAW_STORAGE_MODE = previousMode;
+      if (previousVibeDb === undefined) delete process.env.VIBE_CLAW_DATABASE_URL;
+      else process.env.VIBE_CLAW_DATABASE_URL = previousVibeDb;
+      if (previousDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDb;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets admins reset the active memory store to a fresh state", async () => {
+    const app = await createServer({ store: new MemoryStore(), apiToken: "test-token" });
+    const agentId = await createAgent(app, "ResetAgent", "reset me");
+    const provider = await app.inject({
+      method: "POST",
+      url: "/v1/providers",
+      headers: auth,
+      payload: { name: "Mock", type: "mock", defaultModel: "mock" }
+    });
+    expect(provider.statusCode).toBe(201);
+
+    const before = await app.inject({ method: "GET", url: "/v1/agents", headers: auth });
+    expect(before.json().agents.some((agent: { id: string }) => agent.id === agentId)).toBe(true);
+
+    const reset = await app.inject({
+      method: "POST",
+      url: "/v1/admin/reset-data",
+      headers: auth,
+      payload: { confirm: "RESET_CURRENT_STORE" }
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json()).toMatchObject({ ok: true, storeType: "memory" });
+    expect(reset.json().cleared).toBeGreaterThanOrEqual(3);
+
+    const agents = await app.inject({ method: "GET", url: "/v1/agents", headers: auth });
+    expect(agents.statusCode).toBe(200);
+    expect(agents.json().agents).toHaveLength(0);
+    const tokens = await app.inject({ method: "GET", url: "/v1/tokens", headers: auth });
+    expect(tokens.statusCode).toBe(200);
+    expect(tokens.json().tokens).toHaveLength(1);
+    expect(tokens.json().tokens[0]).toMatchObject({ name: "default-api-token", status: "active" });
   });
 
   it("enforces tool scopes", async () => {
@@ -250,17 +349,25 @@ describe("Vibe Claw API", () => {
       method: "POST",
       url: "/v1/tokens",
       headers: auth,
-      payload: { name: "reader", scopes: ["agents:read"] }
+      payload: { name: "reader", scopes: ["agents:read"], expiresAt: new Date(Date.now() + 60_000).toISOString(), allowedIps: ["127.0.0.1"] }
     });
     expect(create.statusCode).toBe(201);
     const body = create.json();
     expect(body.plainToken).toMatch(/^vcl_/);
     expect(body.token.tokenHash).toBeUndefined();
+    expect(body.token).toMatchObject({ allowedIps: ["127.0.0.1"], lastUsedAt: null, lastUsedIp: null });
 
     const allowed = await app.inject({ method: "GET", url: "/v1/agents", headers: { authorization: `Bearer ${body.plainToken}` } });
     expect(allowed.statusCode).toBe(200);
+    const listed = await app.inject({ method: "GET", url: "/v1/tokens", headers: auth });
+    expect(listed.json().tokens.find((token: { id: string }) => token.id === body.token.id)).toMatchObject({ lastUsedAt: expect.any(String), lastUsedIp: expect.any(String) });
     const denied = await app.inject({ method: "POST", url: "/v1/agents", headers: { authorization: `Bearer ${body.plainToken}` }, payload: { name: "X", instruction: "Y" } });
     expect(denied.statusCode).toBe(403);
+
+    const rotate = await app.inject({ method: "POST", url: `/v1/tokens/${body.token.id}/rotate`, headers: auth });
+    expect(rotate.statusCode).toBe(201);
+    expect(rotate.json().plainToken).toMatch(/^vcl_/);
+    expect(rotate.json().token).toMatchObject({ allowedIps: ["127.0.0.1"], lastUsedAt: null });
 
     const revoke = await app.inject({ method: "POST", url: `/v1/tokens/${body.token.id}/revoke`, headers: auth });
     expect(revoke.statusCode).toBe(200);
@@ -538,6 +645,10 @@ describe("SaaS/API readiness controls", () => {
     const stream = await app.inject({ method: "POST", url: `/v1/agents/${agentId}/messages/stream`, headers: auth, payload: { message: "hello stream" } });
     expect(stream.statusCode).toBe(200);
     expect(stream.headers["content-type"]).toContain("text/event-stream");
+    expect(stream.body.indexOf("event: user_message_created")).toBeGreaterThan(stream.body.indexOf("event: status"));
+    expect(stream.body.indexOf("event: run_created")).toBeGreaterThan(stream.body.indexOf("event: user_message_created"));
+    expect(stream.body.indexOf("event: delta")).toBeGreaterThan(stream.body.indexOf("event: run_created"));
+    expect(stream.body.indexOf("event: assistant_message_completed")).toBeGreaterThan(stream.body.indexOf("event: delta"));
     expect(stream.body).toContain("event: delta");
     expect(stream.body).toContain("event: done");
     const conversations = await app.inject({ method: "GET", url: `/v1/agents/${agentId}/conversations`, headers: auth });
@@ -561,6 +672,45 @@ describe("SaaS/API readiness controls", () => {
     expect(deliveries.json().deliveries[0]).toMatchObject({ runId: run.json().run.id, status: "delivered" });
     const replay = await app.inject({ method: "POST", url: `/v1/webhook-deliveries/${deliveries.json().deliveries[0].id}/replay`, headers: auth, payload: { secret: "super-secret" } });
     expect(replay.statusCode).toBe(200);
+    fetchMock.mockRestore();
+  });
+
+  it("exposes version, usage, billing, prometheus and webhook subscriptions", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+    const app = await createServer({ apiToken: "test-token" });
+    const version = await app.inject({ method: "GET", url: "/v1/version", headers: auth });
+    expect(version.statusCode).toBe(200);
+    expect(version.json()).toMatchObject({ apiVersion: "v1", serviceVersion: expect.any(String) });
+
+    const docs = await app.inject({ method: "GET", url: "/v1/developer-docs", headers: auth });
+    expect(docs.statusCode).toBe(200);
+    expect(docs.json().sdk.some((sdk: { language: string }) => sdk.language === "node")).toBe(true);
+
+    const subscription = await app.inject({
+      method: "POST",
+      url: "/v1/webhook-subscriptions",
+      headers: auth,
+      payload: { name: "runs", url: "https://example.com/subscribed", secretRef: "sub-secret", eventTypes: ["run.completed"] }
+    });
+    expect(subscription.statusCode).toBe(201);
+
+    const agentId = await createAgent(app, "SubscribedWebhookAgent", "test");
+    const run = await app.inject({ method: "POST", url: "/v1/runs", headers: auth, payload: { agentIds: [agentId], input: "subscription webhook" } });
+    await waitForRun(app, run.json().run.id, "completed");
+    await waitFor(() => fetchMock.mock.calls.some(([url]) => url === "https://example.com/subscribed"));
+
+    const usage = await app.inject({ method: "GET", url: "/v1/usage", headers: auth });
+    expect(usage.statusCode).toBe(200);
+    expect(usage.json().summary.requestCount).toBeGreaterThan(0);
+    expect(usage.json().summary.tokenCount).toBeGreaterThan(0);
+
+    const billing = await app.inject({ method: "GET", url: "/v1/billing", headers: auth });
+    expect(billing.statusCode).toBe(200);
+    expect(billing.json().plan).toMatchObject({ id: "launch" });
+
+    const prometheus = await app.inject({ method: "GET", url: "/v1/metrics/prometheus", headers: auth });
+    expect(prometheus.statusCode).toBe(200);
+    expect(prometheus.body).toContain("vibe_claw_runs_total");
     fetchMock.mockRestore();
   });
 });

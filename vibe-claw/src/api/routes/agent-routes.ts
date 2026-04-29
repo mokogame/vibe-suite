@@ -7,6 +7,75 @@ import { actorOf, filterScope, scopeOf, sameScope, withIdempotency } from "../ro
 import { createAgentSchema, createLeaseSchema, createMemorySchema, createMessageSchema, createProtocolRunSchema, createProtocolSchema, parseBody, updateAgentSchema } from "../schemas.js";
 
 export function registerAgentRoutes(app: FastifyInstance, { store, orchestrator }: ApiContext): void {
+  const httpError = (statusCode: number, message: string) => {
+    const error = new Error(message) as Error & { statusCode?: number };
+    error.statusCode = statusCode;
+    return error;
+  };
+
+  const executeMessageFlow = async (
+    agentId: string,
+    request: AuthedRequest,
+    emit?: (event: string, data: Record<string, unknown>) => void | Promise<void>
+  ) => {
+    const agent = await store.getAgent(agentId);
+    const scope = scopeOf(request);
+    if (!agent || !sameScope(agent, scope) || agent.status !== "active") throw httpError(404, "Agent 不存在或不可用");
+    const body = parseBody(createMessageSchema, request.body);
+    const actor = actorOf(request);
+    const leaseCheck = await validateLease(body.leaseId, agent.id, undefined, scope);
+    if (leaseCheck) throw httpError(leaseCheck.status, leaseCheck.error);
+    const conversation = body.conversationId ? await store.getConversation(body.conversationId) : await store.createConversation({ ...scope, agentId: agent.id, mode: "message" });
+    if (!conversation || conversation.agentId !== agent.id || !sameScope(conversation, scope)) throw httpError(404, "Conversation 不存在");
+
+    const requestId = request.requestId ?? newId("req");
+    const lockHolder = `${requestId}:${actor.tokenId}`;
+    await waitForConversationLock(store, scope, conversation.id, lockHolder);
+    try {
+      const historyMessages = body.conversationId ? await store.listMessages(conversation.id) : [];
+      const userMessage = await store.addMessage({ ...scope, conversationId: conversation.id, agentId: agent.id, role: "user", content: body.message });
+      await emit?.("conversation", { conversation });
+      await emit?.("user_message_created", { conversationId: conversation.id, message: userMessage });
+
+      const run = await orchestrator.createRun(requestId, actor, { agentIds: [agent.id], input: body.message, context: body.context });
+      await emit?.("run_created", { run });
+      const typingEvent = await store.addEvent({ ...scope, runId: run.id, stepId: null, status: "typing", title: "正在输入", summary: agent.name + " 已收到消息，正在准备回复。", visible: true });
+      await emit?.("status", { status: "typing", runId: run.id, event: typingEvent });
+      const memoryEvent = await store.addEvent({ ...scope, runId: run.id, stepId: null, status: "retrieving_memory", title: "正在检索记忆", summary: "正在读取 Agent 相关长期记忆。", visible: true });
+      await emit?.("status", { status: "retrieving_memory", runId: run.id, event: memoryEvent });
+
+      const memories = filterScope(await store.listMemories(agent.id), scope).filter((memory) => memory.status === "active");
+      const memoryContext = memories.map((memory) => ({ source: "memory" as const, content: memory.type + ":" + memory.summary + "\n" + memory.content, priority: memory.type === "profile" ? 90 : 65 }));
+      const historyContext = historyMessages.slice(-12).map((message) => ({
+        source: message.role,
+        content: `历史消息(${message.role})：${message.content}`,
+        priority: message.role === "agent" ? 72 : 68
+      }));
+      const externalContext = normalizeContext(body.context ?? []);
+      const compressed = compressContext([...memoryContext, ...historyContext, ...externalContext], body.compression ?? "hybrid", Number(process.env.VIBE_CLAW_CONTEXT_TOKEN_BUDGET ?? 6000));
+      await store.addCompressionAudit({ ...scope, runId: run.id, strategy: body.compression ?? "hybrid", strategyVersion: "v1", originalTokens: compressed.originalTokens, compressedTokens: compressed.compressedTokens, kept: compressed.kept, summarized: compressed.summarized, dropped: compressed.dropped });
+      await store.addAudit({ id: newId("audit"), ...scope, requestId, actor: actor.name, action: "memory.injected", targetType: "run", targetId: run.id, status: "success", metadata: { memoryIds: memories.map((memory) => memory.id), contextCount: compressed.context.length, sourceIp: request.ip, userAgent: request.headers["user-agent"] ?? null }, createdAt: nowIso() });
+      await emit?.("status", { status: "building_context", runId: run.id, contextCount: compressed.context.length });
+
+      const result = await orchestrator.executeRun(requestId, actor, run.id, { agentIds: [agent.id], input: body.message, context: compressed.context });
+      const failed = result.run.status !== "completed";
+      const message = await store.addMessage({
+        ...scope,
+        conversationId: conversation.id,
+        agentId: agent.id,
+        role: failed ? "system" : "agent",
+        content: failed ? `调用失败：${result.run.errorMessage ?? "Agent run failed"}` : result.run.output ?? "",
+        runId: run.id,
+        totalTokens: result.run.totalTokens
+      });
+      if (body.leaseId) await store.consumeLease(body.leaseId, result.run.totalTokens);
+      await store.addArtifact({ ...scope, runId: run.id, type: "text", name: failed ? "agent-message-error" : "agent-message", content: message.content });
+      return { statusCode: 200, body: { conversation, userMessage, message, run: result.run, events: result.events, usage: { totalTokens: result.run.totalTokens } } };
+    } finally {
+      await store.releaseConversationLock(conversation.id, lockHolder);
+    }
+  };
+
   async function validateLease(leaseId: string | undefined, agentId: string, protocol: string | undefined, scope = { tenantId: "default", projectId: "default" }) {
     if (!leaseId) return null;
     const lease = await store.getLease(leaseId);
@@ -150,46 +219,7 @@ export function registerAgentRoutes(app: FastifyInstance, { store, orchestrator 
   });
 
   app.post<{ Params: { id: string } }>("/v1/agents/:id/messages", async (request, reply) => {
-    const agent = await store.getAgent(request.params.id);
-    const scope = scopeOf(request as AuthedRequest);
-    if (!agent || !sameScope(agent, scope) || agent.status !== "active") return reply.status(404).send({ error: "Agent 不存在或不可用" });
-    const body = parseBody(createMessageSchema, request.body);
-    const actor = actorOf(request as AuthedRequest);
-    const leaseCheck = await validateLease(body.leaseId, agent.id, undefined, scope);
-    if (leaseCheck) return reply.status(leaseCheck.status).send({ error: leaseCheck.error });
-    const conversation = body.conversationId ? await store.getConversation(body.conversationId) : await store.createConversation({ ...scope, agentId: agent.id, mode: "message" });
-    if (!conversation || conversation.agentId !== agent.id || !sameScope(conversation, scope)) return reply.status(404).send({ error: "Conversation 不存在" });
-
-    return withIdempotency(store, request as AuthedRequest, reply, async () => {
-      const requestId = (request as AuthedRequest).requestId ?? newId("req");
-      const lockHolder = `${requestId}:${actor.tokenId}`;
-      await waitForConversationLock(store, scope, conversation.id, lockHolder);
-      try {
-        const historyMessages = body.conversationId ? await store.listMessages(conversation.id) : [];
-        const userMessage = await store.addMessage({ ...scope, conversationId: conversation.id, agentId: agent.id, role: "user", content: body.message });
-        const run = await orchestrator.createRun(requestId, actor, { agentIds: [agent.id], input: body.message, context: body.context });
-        await store.addEvent({ ...scope, runId: run.id, stepId: null, status: "typing", title: "正在输入", summary: agent.name + " 已收到消息，正在准备回复。", visible: true });
-        await store.addEvent({ ...scope, runId: run.id, stepId: null, status: "retrieving_memory", title: "正在检索记忆", summary: "正在读取 Agent 相关长期记忆。", visible: true });
-        const memories = filterScope(await store.listMemories(agent.id), scope).filter((memory) => memory.status === "active");
-        const memoryContext = memories.map((memory) => ({ source: "memory" as const, content: memory.type + ":" + memory.summary + "\n" + memory.content, priority: memory.type === "profile" ? 90 : 65 }));
-        const historyContext = historyMessages.slice(-12).map((message) => ({
-          source: message.role,
-          content: `历史消息(${message.role})：${message.content}`,
-          priority: message.role === "agent" ? 72 : 68
-        }));
-        const externalContext = normalizeContext(body.context ?? []);
-        const compressed = compressContext([...memoryContext, ...historyContext, ...externalContext], body.compression ?? "hybrid", Number(process.env.VIBE_CLAW_CONTEXT_TOKEN_BUDGET ?? 6000));
-        await store.addCompressionAudit({ ...scope, runId: run.id, strategy: body.compression ?? "hybrid", strategyVersion: "v1", originalTokens: compressed.originalTokens, compressedTokens: compressed.compressedTokens, kept: compressed.kept, summarized: compressed.summarized, dropped: compressed.dropped });
-        await store.addAudit({ id: newId("audit"), ...scope, requestId, actor: actor.name, action: "memory.injected", targetType: "run", targetId: run.id, status: "success", metadata: { memoryIds: memories.map((memory) => memory.id), contextCount: compressed.context.length, sourceIp: request.ip, userAgent: request.headers["user-agent"] ?? null }, createdAt: nowIso() });
-        const result = await orchestrator.executeRun(requestId, actor, run.id, { agentIds: [agent.id], input: body.message, context: compressed.context });
-        const message = await store.addMessage({ ...scope, conversationId: conversation.id, agentId: agent.id, role: "agent", content: result.run.output ?? "", runId: run.id, totalTokens: result.run.totalTokens });
-        if (body.leaseId) await store.consumeLease(body.leaseId, result.run.totalTokens);
-        await store.addArtifact({ ...scope, runId: run.id, type: "text", name: "agent-message", content: message.content });
-        return { statusCode: 200, body: { conversation, userMessage, message, run: result.run, events: result.events, usage: { totalTokens: result.run.totalTokens } } };
-      } finally {
-        await store.releaseConversationLock(conversation.id, lockHolder);
-      }
-    });
+    return withIdempotency(store, request as AuthedRequest, reply, () => executeMessageFlow(request.params.id, request as AuthedRequest));
   });
 
   app.post<{ Params: { id: string } }>("/v1/agents/:id/messages/stream", async (request, reply) => {
@@ -205,25 +235,18 @@ export function registerAgentRoutes(app: FastifyInstance, { store, orchestrator 
     };
     send("status", { status: "started", requestId: (request as AuthedRequest).requestId });
     try {
-      const response = await app.inject({
-        method: "POST",
-        url: `/v1/agents/${request.params.id}/messages`,
-        headers: {
-          authorization: request.headers.authorization ?? "",
-          "x-request-id": (request as AuthedRequest).requestId ?? newId("req")
-        },
-        payload: request.body as object
-      });
-      const payload = response.json() as { message?: { content?: string }; run?: { id?: string; status?: string }; conversation?: { id?: string }; error?: string };
-      if (response.statusCode >= 400) {
-        send("error", { statusCode: response.statusCode, error: payload.error ?? "流式对话失败" });
+      const response = await executeMessageFlow(request.params.id, request as AuthedRequest, send);
+      const payload = response.body;
+      if (payload.run.status === "completed" && payload.message.role === "agent") {
+        for (const part of chunkText(payload.message.content, 80)) send("delta", { text: part, messageId: payload.message.id, runId: payload.run.id });
+        send("assistant_message_completed", { message: payload.message, run: payload.run });
       } else {
-        const text = payload.message?.content ?? "";
-        for (const part of chunkText(text, 80)) send("delta", { text: part });
-        send("done", { conversationId: payload.conversation?.id, runId: payload.run?.id, status: payload.run?.status });
+        send("error", { statusCode: 200, error: payload.message.content, message: payload.message, run: payload.run });
       }
+      send("done", { conversationId: payload.conversation.id, runId: payload.run.id, status: payload.run.status });
     } catch (error) {
-      send("error", { error: error instanceof Error ? error.message : "流式对话失败" });
+      const typed = error as Error & { statusCode?: number };
+      send("error", { statusCode: typed.statusCode ?? 500, error: typed.message || "流式对话失败" });
     } finally {
       reply.raw.end();
     }

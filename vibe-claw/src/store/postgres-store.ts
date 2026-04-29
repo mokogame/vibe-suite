@@ -1,8 +1,8 @@
 import pg from "pg";
 import { newId, nowIso } from "../core/ids.js";
 import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
-import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, Store, UpdateAgentData, UpdateProviderData } from "./store.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
+import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, CreateUsageCounterData, CreateWebhookSubscriptionData, Store, UpdateAgentData, UpdateProviderData, UpdateWebhookSubscriptionData } from "./store.js";
 import { withoutUndefined } from "./store.js";
 
 const { Pool } = pg;
@@ -27,6 +27,44 @@ export class PostgresStore implements Store {
     } catch (error) {
       return { ok: false, type: "postgres" as const, error: error instanceof Error ? error.message : "数据库不可用" };
     }
+  }
+
+  async resetData() {
+    const appTables = [
+      "agent_messages",
+      "agent_conversations",
+      "agent_memories",
+      "agent_protocols",
+      "agent_leases",
+      "agent_run_steps",
+      "run_events",
+      "run_artifacts",
+      "compression_audits",
+      "run_queue_tasks",
+      "agent_run_contexts",
+      "agent_versions",
+      "model_configs",
+      "agent_runs",
+      "agents",
+      "model_providers",
+      "api_tokens",
+      "audit_events",
+      "idempotency_records",
+      "conversation_locks",
+      "usage_counters",
+      "webhook_deliveries",
+      "webhook_subscriptions"
+    ];
+    const existing = await this.pool.query<{ table_name: string }>(
+      `select table_name from information_schema.tables where table_schema='public' and table_name = any($1)`,
+      [appTables]
+    );
+    const tableNames = existing.rows.map((row) => row.table_name);
+    if (tableNames.length === 0) return { storeType: "postgres" as const, cleared: 0 };
+    const counts = await Promise.all(tableNames.map((name) => this.pool.query(`select count(*)::int as count from ${quoteIdent(name)}`)));
+    const cleared = counts.reduce((sum, result) => sum + Number(result.rows[0]?.count ?? 0), 0);
+    await this.pool.query(`truncate table ${tableNames.map(quoteIdent).join(", ")} restart identity cascade`);
+    return { storeType: "postgres" as const, cleared };
   }
 
   async createAgent(data: CreateAgentData): Promise<Agent> {
@@ -363,10 +401,10 @@ export class PostgresStore implements Store {
   async addToken(token: ApiToken): Promise<ApiToken> {
     const scoped = scopeFrom(token);
     await this.pool.query(
-      `insert into api_tokens (id, tenant_id, project_id, token_hash, name, scopes, status, created_at, revoked_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `insert into api_tokens (id, tenant_id, project_id, token_hash, name, scopes, status, expires_at, allowed_ips, last_used_at, last_used_ip, created_at, revoked_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        on conflict (token_hash) do nothing`,
-      [token.id, scoped.tenantId, scoped.projectId, token.tokenHash, token.name, token.scopes.join(","), token.status, token.createdAt, token.revokedAt]
+      [token.id, scoped.tenantId, scoped.projectId, token.tokenHash, token.name, token.scopes.join(","), token.status, token.expiresAt, token.allowedIps.join(","), token.lastUsedAt, token.lastUsedIp, token.createdAt, token.revokedAt]
     );
     return token;
   }
@@ -378,6 +416,14 @@ export class PostgresStore implements Store {
 
   async getToken(id: string): Promise<ApiToken | null> {
     const result = await this.pool.query(`select * from api_tokens where id=$1`, [id]);
+    return result.rows[0] ? rowToToken(result.rows[0]) : null;
+  }
+
+  async markTokenUsed(id: string, usedAt: string, ip: string | null): Promise<ApiToken | null> {
+    const result = await this.pool.query(
+      `update api_tokens set last_used_at=$2, last_used_ip=$3 where id=$1 returning *`,
+      [id, usedAt, ip]
+    );
     return result.rows[0] ? rowToToken(result.rows[0]) : null;
   }
 
@@ -466,6 +512,80 @@ export class PostgresStore implements Store {
     return result.rows[0] ? rowToQueueTask(result.rows[0]) : null;
   }
 
+  async recordUsage(data: CreateUsageCounterData): Promise<UsageCounter> {
+    const scoped = scopeFrom(data);
+    const now = nowIso();
+    const result = await this.pool.query(
+      `insert into usage_counters (id, tenant_id, project_id, token_id, agent_id, provider_id, usage_window, request_count, token_count, cost_units, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+       on conflict (tenant_id, project_id, (coalesce(token_id, ''::text)), (coalesce(agent_id, ''::text)), (coalesce(provider_id, ''::text)), usage_window)
+       do update set
+         request_count=usage_counters.request_count + excluded.request_count,
+         token_count=usage_counters.token_count + excluded.token_count,
+         cost_units=usage_counters.cost_units + excluded.cost_units,
+         updated_at=excluded.updated_at
+       returning *`,
+      [
+        newId("usage"),
+        scoped.tenantId,
+        scoped.projectId,
+        data.tokenId ?? null,
+        data.agentId ?? null,
+        data.providerId ?? null,
+        data.usageWindow,
+        data.requestCount ?? 0,
+        data.tokenCount ?? 0,
+        data.costUnits ?? 0,
+        now
+      ]
+    );
+    return rowToUsageCounter(result.rows[0]);
+  }
+
+  async listUsageCounters(scope: ResourceScope = {}): Promise<UsageCounter[]> {
+    const scoped = scopeFrom(scope);
+    const result = await this.pool.query(`select * from usage_counters where tenant_id=$1 and project_id=$2 order by usage_window desc, updated_at desc`, [scoped.tenantId, scoped.projectId]);
+    return result.rows.map(rowToUsageCounter);
+  }
+
+  async createWebhookSubscription(data: CreateWebhookSubscriptionData): Promise<WebhookSubscription> {
+    const now = nowIso();
+    const subscription: WebhookSubscription = {
+      id: newId("whsub"),
+      ...scopeFrom(data),
+      name: data.name,
+      url: data.url,
+      secretRef: data.secretRef ?? null,
+      eventTypes: data.eventTypes,
+      status: "active",
+      createdAt: now,
+      updatedAt: now
+    };
+    await this.pool.query(
+      `insert into webhook_subscriptions (id, tenant_id, project_id, name, url, secret_ref, event_types, status, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [subscription.id, subscription.tenantId, subscription.projectId, subscription.name, subscription.url, subscription.secretRef, subscription.eventTypes.join(","), subscription.status, subscription.createdAt, subscription.updatedAt]
+    );
+    return subscription;
+  }
+
+  async updateWebhookSubscription(id: string, patch: UpdateWebhookSubscriptionData): Promise<WebhookSubscription | null> {
+    const current = (await this.pool.query(`select * from webhook_subscriptions where id=$1`, [id])).rows[0];
+    if (!current) return null;
+    const next = { ...rowToWebhookSubscription(current), ...withoutUndefined(patch), updatedAt: nowIso() };
+    await this.pool.query(
+      `update webhook_subscriptions set name=$2, url=$3, secret_ref=$4, event_types=$5, status=$6, updated_at=$7 where id=$1 returning *`,
+      [id, next.name, next.url, next.secretRef, next.eventTypes.join(","), next.status, next.updatedAt]
+    );
+    return next;
+  }
+
+  async listWebhookSubscriptions(scope: ResourceScope = {}): Promise<WebhookSubscription[]> {
+    const scoped = scopeFrom(scope);
+    const result = await this.pool.query(`select * from webhook_subscriptions where tenant_id=$1 and project_id=$2 order by created_at desc`, [scoped.tenantId, scoped.projectId]);
+    return result.rows.map(rowToWebhookSubscription);
+  }
+
   async createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery> {
     const now = nowIso();
     const delivery: WebhookDelivery = { id: newId("wh"), createdAt: now, updatedAt: now, ...data };
@@ -499,6 +619,10 @@ function iso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
 
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
 function scopeFrom(value: Partial<ResourceScope>): Required<ResourceScope> {
   return { tenantId: value.tenantId ?? DEFAULT_TENANT_ID, projectId: value.projectId ?? DEFAULT_PROJECT_ID };
 }
@@ -517,6 +641,36 @@ function rowToIdempotency(row: Record<string, unknown>): IdempotencyRecord {
 
 function rowToWebhookDelivery(row: Record<string, unknown>): WebhookDelivery {
   return { id: String(row.id), tenantId: String(row.tenant_id ?? DEFAULT_TENANT_ID), projectId: String(row.project_id ?? DEFAULT_PROJECT_ID), runId: String(row.run_id), url: String(row.url), status: row.status as WebhookDelivery["status"], attempts: Number(row.attempts), maxAttempts: Number(row.max_attempts), nextAttemptAt: row.next_attempt_at === null ? null : iso(row.next_attempt_at), statusCode: row.status_code === null ? null : Number(row.status_code), error: row.error === null ? null : String(row.error), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+}
+
+function rowToUsageCounter(row: Record<string, unknown>): UsageCounter {
+  return {
+    id: String(row.id),
+    ...rowScope(row),
+    tokenId: row.token_id === null || row.token_id === undefined ? null : String(row.token_id),
+    agentId: row.agent_id === null || row.agent_id === undefined ? null : String(row.agent_id),
+    providerId: row.provider_id === null || row.provider_id === undefined ? null : String(row.provider_id),
+    usageWindow: String(row.usage_window),
+    requestCount: Number(row.request_count),
+    tokenCount: Number(row.token_count),
+    costUnits: Number(row.cost_units),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function rowToWebhookSubscription(row: Record<string, unknown>): WebhookSubscription {
+  return {
+    id: String(row.id),
+    ...rowScope(row),
+    name: String(row.name),
+    url: String(row.url),
+    secretRef: row.secret_ref === null || row.secret_ref === undefined ? null : String(row.secret_ref),
+    eventTypes: String(row.event_types ?? "").split(",").filter(Boolean),
+    status: row.status as WebhookSubscription["status"],
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
 }
 
 function rowToMemory(row: Record<string, unknown>): AgentMemory {
@@ -633,6 +787,10 @@ function rowToToken(row: Record<string, unknown>): ApiToken {
     name: String(row.name),
     scopes: String(row.scopes).split(",").filter(Boolean),
     status: row.status as ApiToken["status"],
+    expiresAt: row.expires_at === null || row.expires_at === undefined ? null : iso(row.expires_at),
+    allowedIps: String(row.allowed_ips ?? "").split(",").filter(Boolean),
+    lastUsedAt: row.last_used_at === null || row.last_used_at === undefined ? null : iso(row.last_used_at),
+    lastUsedIp: row.last_used_ip === null || row.last_used_ip === undefined ? null : String(row.last_used_ip),
     createdAt: iso(row.created_at),
     revokedAt: row.revoked_at === null ? null : iso(row.revoked_at)
   };

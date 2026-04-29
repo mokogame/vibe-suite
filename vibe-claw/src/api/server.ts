@@ -6,6 +6,7 @@ import { validateJsonSchema } from "../core/json-schema.js";
 import { Orchestrator } from "../core/orchestrator.js";
 import { RunQueue } from "../core/run-queue.js";
 import { deliverRunWebhook } from "../core/webhooks.js";
+import { readRuntimeStorageConfig, saveRuntimeStorageConfig } from "../config/runtime-config.js";
 import { createDefaultProvider, createProviderFromConfig, type ModelProvider } from "../model/providers.js";
 import { createPlainToken, hashToken, TokenRegistry } from "../security/tokens.js";
 import { MemoryStore } from "../store/memory-store.js";
@@ -20,7 +21,7 @@ import { registerAgentRoutes } from "./routes/agent-routes.js";
 import { registerProviderRoutes } from "./routes/provider-routes.js";
 import { registerQueueRoutes, queueStats } from "./routes/queue-routes.js";
 import { registerTokenRoutes } from "./routes/token-routes.js";
-import { createAgentSchema, createLeaseSchema, createMemorySchema, createMessageSchema, createProtocolRunSchema, createProtocolSchema, createProviderSchema, createRunSchema, createTokenSchema, parseBody, updateAgentSchema, updateProviderSchema, ValidationError } from "./schemas.js";
+import { createAgentSchema, createLeaseSchema, createMemorySchema, createMessageSchema, createProtocolRunSchema, createProtocolSchema, createProviderSchema, createRunSchema, createTokenSchema, createWebhookSubscriptionSchema, parseBody, replayWebhookSchema, resetDataSchema, updateAgentSchema, updateProviderSchema, updateStorageConfigSchema, updateWebhookSubscriptionSchema, ValidationError } from "./schemas.js";
 import type { AgentRun } from "../types.js";
 
 export type ServerOptions = {
@@ -32,8 +33,10 @@ export type ServerOptions = {
 export async function createServer(options: ServerOptions = {}): Promise<FastifyInstance> {
   const store = options.store ?? createStoreFromEnv();
   const provider = options.provider ?? createDefaultProvider();
+  const defaultApiToken = options.apiToken ?? process.env.VIBE_CLAW_API_TOKEN ?? "dev-token";
   const tokenRegistry = new TokenRegistry(store);
-  await tokenRegistry.registerPlainToken("default-api-token", options.apiToken ?? process.env.VIBE_CLAW_API_TOKEN ?? "dev-token", ["*"]);
+  const registerDefaultToken = () => tokenRegistry.registerPlainToken("default-api-token", defaultApiToken, ["*"]);
+  await registerDefaultToken();
   const usageLimiter = createUsageLimiter({
     windowMs: Number(process.env.VIBE_CLAW_RATE_LIMIT_WINDOW_MS ?? 60_000),
     maxRequests: Number(process.env.VIBE_CLAW_RATE_LIMIT_MAX ?? 600),
@@ -45,14 +48,25 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const orchestrator = new Orchestrator(store, provider, {
     modelTimeoutMs: Number(process.env.VIBE_CLAW_MODEL_TIMEOUT_MS ?? 90_000),
     contextTokenBudget: Number(process.env.VIBE_CLAW_CONTEXT_TOKEN_BUDGET ?? 6000),
-    resolveProvider: async (providerId) => {
-      if (!providerId) return provider;
-      const config = await store.getProvider(providerId);
-      if (!config) throw new Error("Provider 不存在：" + providerId);
+    resolveProvider: async (providerId, _agentProviderId, agentDefaultModel) => {
+      const config = providerId
+        ? await store.getProvider(providerId)
+        : (await store.listProviders()).find((item) => item.status === "active" && item.defaultModel === agentDefaultModel) ?? null;
+      if (providerId && !config) throw new Error(`Provider 不存在：${providerId}`);
+      if (!config) return provider;
       return createProviderFromConfig(config);
     },
     onUsage: async ({ actor, agentId, provider: providerName, totalTokens }) => {
       usageLimiter.recordUsage(actor, { agentId, provider: providerName, tokens: totalTokens });
+      await store.recordUsage({
+        ...scopeOf(actor),
+        tokenId: actor.tokenId,
+        agentId,
+        providerId: providerName,
+        usageWindow: usageWindow(),
+        tokenCount: totalTokens,
+        costUnits: Math.ceil((totalTokens / 1000) * Number(process.env.VIBE_CLAW_COST_CENTS_PER_1K_TOKENS ?? 1))
+      });
     }
   });
   const queue = new RunQueue(Number(process.env.VIBE_CLAW_RUN_CONCURRENCY ?? 2));
@@ -60,7 +74,8 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   await recoverInterruptedRuns(store, queue, orchestrator, workerId);
 
   const app = Fastify({ logger: false });
-  await app.register(cors, { origin: true });
+  const corsOrigin = process.env.VIBE_CLAW_CORS_ORIGIN ? process.env.VIBE_CLAW_CORS_ORIGIN.split(",").map((item) => item.trim()).filter(Boolean) : true;
+  await app.register(cors, { origin: corsOrigin });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ValidationError) {
@@ -71,6 +86,29 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     const statusCode = typeof normalized.statusCode === "number" ? normalized.statusCode : 500;
     const message = typeof normalized.message === "string" ? normalized.message : "请求失败";
     void reply.status(statusCode).send({ error: statusCode >= 500 ? "内部服务错误" : message });
+  });
+
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (reply.statusCode < 400) return payload;
+    const requestId = (request as AuthedRequest).requestId ?? request.headers["x-request-id"]?.toString() ?? newId("req");
+    const raw = Buffer.isBuffer(payload) ? payload.toString("utf8") : typeof payload === "string" ? payload : "";
+    let body: Record<string, unknown> = {};
+    try {
+      body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    } catch {
+      body = { error: raw || "请求失败" };
+    }
+    const message = String(body.message ?? body.error ?? "请求失败");
+    const code = String(body.code ?? errorCodeForStatus(reply.statusCode));
+    reply.header("content-type", "application/json; charset=utf-8");
+    return JSON.stringify({
+      ...body,
+      error: body.error ?? message,
+      code,
+      message,
+      details: body.details ?? errorDetails(body),
+      requestId
+    });
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -90,12 +128,13 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       return reply;
     }
 
-    const actor = await tokenRegistry.authenticate(token, requiredScope);
+    const actor = await tokenRegistry.authenticate(token, requiredScope, request.ip);
     if (!actor) {
       await reply.status(403).send({ error: "Token 无效或权限不足" });
       return reply;
     }
     authed.actor = actor;
+    await store.recordUsage({ ...scopeOf(actor), tokenId: actor.tokenId, usageWindow: usageWindow(), requestCount: 1 });
     const limit = usageLimiter.enter(actor);
     if (!limit.allowed) {
       await reply.status(429).send({ error: limit.reason, remaining: limit.remaining });
@@ -133,6 +172,55 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     };
   });
 
+  app.get("/v1/admin/storage-config", async () => {
+    const storeHealth = await store.healthCheck();
+    return { config: await readRuntimeStorageConfig(storeHealth.type) };
+  });
+
+  app.post("/v1/admin/storage-config", async (request) => {
+    const input = parseBody(updateStorageConfigSchema, request.body);
+    const storeHealth = await store.healthCheck();
+    const config = await saveRuntimeStorageConfig(input, storeHealth.type);
+    return {
+      config,
+      requiresRestart: true,
+      message: "存储配置已写入 .env.local；当前进程不会热切换存储，请重启服务后生效。"
+    };
+  });
+
+  app.post("/v1/admin/restart", async () => {
+    if (process.env.NODE_ENV === "test" || process.env.VIBE_CLAW_DISABLE_ADMIN_RESTART === "1") {
+      return {
+        ok: false,
+        restartScheduled: false,
+        message: "当前环境已禁用后台重启；生产环境请由进程管理器执行重启。"
+      };
+    }
+    setTimeout(() => process.exit(0), 300).unref();
+    return {
+      ok: true,
+      restartScheduled: true,
+      message: "服务将在当前响应返回后退出；请确保 dev watcher、PM2、systemd 或容器平台会自动拉起进程。"
+    };
+  });
+
+  app.post("/v1/admin/reset-data", async (request) => {
+    parseBody(resetDataSchema, request.body);
+    const before = await store.healthCheck();
+    const result = await store.resetData();
+    const clearedQueueTasks = queue.clearPending();
+    await registerDefaultToken();
+    return {
+      ok: true,
+      storeType: result.storeType,
+      cleared: result.cleared,
+      clearedQueueTasks,
+      message: before.type === "postgres"
+        ? "当前 Postgres 数据已重置；保留数据库结构和存储配置，已重新写入默认 API Token。"
+        : "当前内存数据已清空；已重新写入默认 API Token。"
+    };
+  });
+
   app.get("/v1/metrics", async (request) => {
     const scope = scopeOf(request as AuthedRequest);
     const [runs, tasks, deliveries, audits] = await Promise.all([
@@ -163,6 +251,60 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
         traceField: "requestId"
       }
     };
+  });
+
+  app.get("/v1/metrics/prometheus", async (request, reply) => {
+    const scope = scopeOf(request as AuthedRequest);
+    const [runs, tasks, usage] = await Promise.all([store.listRuns(), store.listQueueTasks(), store.listUsageCounters(scope)]);
+    const scopedRuns = filterScope(runs, scope);
+    const scopedTasks = filterScope(tasks, scope);
+    const lines = [
+      "# HELP vibe_claw_runs_total Total runs by status",
+      "# TYPE vibe_claw_runs_total counter",
+      ...countBy(scopedRuns, "status").map(([status, count]) => `vibe_claw_runs_total{status="${status}"} ${count}`),
+      "# HELP vibe_claw_queue_tasks Current persisted queue tasks by status",
+      "# TYPE vibe_claw_queue_tasks gauge",
+      ...countBy(scopedTasks, "status").map(([status, count]) => `vibe_claw_queue_tasks{status="${status}"} ${count}`),
+      "# HELP vibe_claw_usage_requests_total Persisted API requests",
+      "# TYPE vibe_claw_usage_requests_total counter",
+      `vibe_claw_usage_requests_total ${usage.reduce((sum, item) => sum + item.requestCount, 0)}`,
+      "# HELP vibe_claw_usage_tokens_total Persisted model tokens",
+      "# TYPE vibe_claw_usage_tokens_total counter",
+      `vibe_claw_usage_tokens_total ${usage.reduce((sum, item) => sum + item.tokenCount, 0)}`
+    ];
+    reply.type("text/plain; version=0.0.4; charset=utf-8");
+    return lines.join("\n") + "\n";
+  });
+
+  app.get("/v1/version", async () => ({
+    apiVersion: "v1",
+    serviceVersion: "0.4.0",
+    compatibility: "v1 endpoints are additive within the same major API version.",
+    deprecationPolicy: "Deprecated fields keep a minimum 90-day compatibility window and are documented in CHANGELOG.",
+    changelog: ["/v1 adds agents, runs, messages, memories, tokens, usage, billing and webhooks."]
+  }));
+
+  app.get("/v1/developer-docs", async () => ({
+    documents: [
+      { title: "Developer API", path: "docs/developer-api.md" },
+      { title: "API Versioning", path: "docs/API_VERSIONING.md" },
+      { title: "Changelog", path: "docs/CHANGELOG.md" }
+    ],
+    sdk: [
+      { language: "node", path: "sdk/node/client.mjs" },
+      { language: "python", path: "sdk/python/client.py" }
+    ]
+  }));
+
+  app.get("/v1/usage", async (request) => {
+    const counters = await store.listUsageCounters(scopeOf(request as AuthedRequest));
+    return { usage: counters, summary: summarizeUsage(counters) };
+  });
+
+  app.get("/v1/billing", async (request) => {
+    const usage = await store.listUsageCounters(scopeOf(request as AuthedRequest));
+    const plan = billingPlan();
+    return { plan, usage: summarizeUsage(usage), invoices: [{ id: `invoice_${usageWindow().slice(0, 7)}`, status: "draft", amountCents: summarizeUsage(usage).costUnits }] };
   });
 
   const apiContext = { store, orchestrator, queue };
@@ -219,6 +361,23 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     return { deliveries: filterScope(await store.listWebhookDeliveries(runId), scopeOf(request as AuthedRequest)) };
   });
 
+  app.get("/v1/webhook-subscriptions", async (request) => ({
+    subscriptions: await store.listWebhookSubscriptions(scopeOf(request as AuthedRequest))
+  }));
+
+  app.post("/v1/webhook-subscriptions", async (request, reply) => {
+    const body = parseBody(createWebhookSubscriptionSchema, request.body);
+    const subscription = await store.createWebhookSubscription({ ...scopeOf(request as AuthedRequest), ...body, eventTypes: body.eventTypes ?? ["run.completed"] });
+    return reply.status(201).send({ subscription });
+  });
+
+  app.patch<{ Params: { id: string } }>("/v1/webhook-subscriptions/:id", async (request, reply) => {
+    const existing = (await store.listWebhookSubscriptions(scopeOf(request as AuthedRequest))).find((item) => item.id === request.params.id);
+    if (!existing) return reply.status(404).send({ error: "Webhook subscription 不存在" });
+    const subscription = await store.updateWebhookSubscription(existing.id, parseBody(updateWebhookSubscriptionSchema, request.body));
+    return { subscription };
+  });
+
   app.post<{ Params: { id: string } }>("/v1/webhook-deliveries/:id/replay", async (request, reply) => {
     const delivery = (await store.listWebhookDeliveries()).find((item) => item.id === request.params.id);
     const scope = scopeOf(request as AuthedRequest);
@@ -227,7 +386,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     if (!run || !sameScope(run, scope)) return reply.status(404).send({ error: "Run 不存在" });
     const sent = await deliverRunWebhook({
       url: delivery.url,
-      secret: (request.body as { secret?: string } | undefined)?.secret,
+      secret: parseBody(replayWebhookSchema, request.body ?? {}).secret,
       requestId: (request as AuthedRequest).requestId ?? newId("req"),
       run,
       steps: await store.listSteps(run.id),
@@ -268,7 +427,11 @@ async function enrichRunForList(store: Store, run: AgentRun) {
 }
 
 function createStoreFromEnv(): Store {
+  if (process.env.VIBE_CLAW_STORAGE_MODE === "memory") return new MemoryStore();
   const connectionString = process.env.VIBE_CLAW_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (process.env.VIBE_CLAW_STORAGE_MODE === "postgres" && !connectionString) {
+    throw new Error("VIBE_CLAW_STORAGE_MODE=postgres 时必须配置 VIBE_CLAW_DATABASE_URL 或 DATABASE_URL");
+  }
   return connectionString ? new PostgresStore({ connectionString }) : new MemoryStore();
 }
 
@@ -296,8 +459,16 @@ function enqueuePersistedRun(queue: RunQueue, store: Store, orchestrator: Orches
       nextRunAt: terminalStatus === "failed" ? new Date(Date.now() + retryDelayMs(task.attempts)).toISOString() : null
     });
     if (terminalStatus === "failed") enqueuePersistedRun(queue, store, orchestrator, workerId, webhookOptions);
-    if (task.input.callbackUrl && ["completed", "failed", "dead_letter"].includes(terminalStatus)) {
-      await deliverReliableWebhook(store, task, result, webhookOptions?.secret ?? task.input.callbackSecret);
+    if (["completed", "failed", "dead_letter"].includes(terminalStatus)) {
+      if (task.input.callbackUrl) {
+        await deliverReliableWebhook(store, task, result, { url: task.input.callbackUrl, secret: webhookOptions?.secret ?? task.input.callbackSecret });
+      }
+      const eventType = `run.${terminalStatus === "dead_letter" ? "failed" : terminalStatus}`;
+      const subscriptions = (await store.listWebhookSubscriptions(task))
+        .filter((item) => item.status === "active" && (item.eventTypes.includes(eventType) || item.eventTypes.includes("run.*")));
+      for (const subscription of subscriptions) {
+        await deliverReliableWebhook(store, task, result, { url: subscription.url, secret: subscription.secretRef ?? undefined });
+      }
     }
   });
 }
@@ -306,14 +477,14 @@ async function deliverReliableWebhook(
   store: Store,
   task: Awaited<ReturnType<Store["claimQueueTask"]>> & {},
   result: Awaited<ReturnType<Orchestrator["executeRun"]>>,
-  secret?: string
+  target: { url: string; secret?: string }
 ) {
-  if (!task || !task.input.callbackUrl) return;
+  if (!task) return;
   const delivery = await store.createWebhookDelivery({
     tenantId: task.tenantId,
     projectId: task.projectId,
     runId: task.runId,
-    url: task.input.callbackUrl,
+    url: target.url,
     status: "queued",
     attempts: 0,
     maxAttempts: 3,
@@ -324,8 +495,8 @@ async function deliverReliableWebhook(
   let current = delivery;
   for (let attempt = 1; attempt <= delivery.maxAttempts; attempt += 1) {
     const sent = await deliverRunWebhook({
-      url: task.input.callbackUrl,
-      secret,
+      url: target.url,
+      secret: target.secret,
       requestId: task.requestId,
       run: result.run,
       steps: result.steps,
@@ -348,7 +519,7 @@ async function deliverReliableWebhook(
       targetType: "run",
       targetId: task.runId,
       status: sent.ok ? "success" : "failed",
-      metadata: { deliveryId: current.id, url: task.input.callbackUrl, statusCode: sent.statusCode, error: sent.error },
+      metadata: { deliveryId: current.id, url: target.url, statusCode: sent.statusCode, error: sent.error },
       createdAt: nowIso()
     });
     if (sent.ok) return;
@@ -358,6 +529,54 @@ async function deliverReliableWebhook(
 
 function retryDelayMs(attempt: number): number {
   return Math.min(10_000, 250 * 2 ** Math.max(0, attempt));
+}
+
+function usageWindow(date = new Date()): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function billingPlan() {
+  return {
+    id: "launch",
+    name: "Launch",
+    monthlyRequestLimit: Number(process.env.VIBE_CLAW_PLAN_MONTHLY_REQUESTS ?? 1_000_000),
+    monthlyTokenLimit: Number(process.env.VIBE_CLAW_PLAN_MONTHLY_TOKENS ?? 50_000_000),
+    monthlyCostLimitCents: Number(process.env.VIBE_CLAW_MONTHLY_COST_BUDGET_CENTS ?? 100_000),
+    features: ["agents", "messages", "runs", "memories", "webhooks", "audit", "usage"]
+  };
+}
+
+function summarizeUsage(counters: Array<{ requestCount: number; tokenCount: number; costUnits: number }>) {
+  return counters.reduce(
+    (sum, item) => ({
+      requestCount: sum.requestCount + item.requestCount,
+      tokenCount: sum.tokenCount + item.tokenCount,
+      costUnits: sum.costUnits + item.costUnits
+    }),
+    { requestCount: 0, tokenCount: 0, costUnits: 0 }
+  );
+}
+
+function countBy<T extends Record<string, unknown>>(items: T[], key: keyof T): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(String(item[key]), (counts.get(String(item[key])) ?? 0) + 1);
+  return [...counts.entries()];
+}
+
+function errorCodeForStatus(statusCode: number): string {
+  if (statusCode === 400) return "VALIDATION_ERROR";
+  if (statusCode === 401) return "AUTH_MISSING";
+  if (statusCode === 403) return "FORBIDDEN";
+  if (statusCode === 404) return "NOT_FOUND";
+  if (statusCode === 409) return "CONFLICT";
+  if (statusCode === 422) return "UNPROCESSABLE_ENTITY";
+  if (statusCode === 429) return "RATE_LIMITED";
+  if (statusCode >= 500) return "INTERNAL_ERROR";
+  return "REQUEST_FAILED";
+}
+
+function errorDetails(body: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(body).filter(([key]) => !["error", "code", "message", "requestId"].includes(key)));
 }
 
 function createUsageLimiter(options: { windowMs: number; maxRequests: number; maxConcurrency: number; dailyTokenQuota: number; monthlyCostBudgetCents: number; centsPer1kTokens: number }) {

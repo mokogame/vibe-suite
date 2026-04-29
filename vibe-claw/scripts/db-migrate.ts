@@ -1,4 +1,7 @@
 import { migrate } from "../src/db/migrate.js";
+import { loadRuntimeEnv } from "../src/config/runtime-config.js";
+
+await loadRuntimeEnv();
 
 const connectionString = process.env.VIBE_CLAW_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!connectionString) {

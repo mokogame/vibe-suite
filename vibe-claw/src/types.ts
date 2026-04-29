@@ -104,6 +104,10 @@ export type ApiToken = {
   name: string;
   scopes: string[];
   status: TokenStatus;
+  expiresAt: string | null;
+  allowedIps: string[];
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
   createdAt: string;
   revokedAt: string | null;
 };
@@ -329,4 +333,41 @@ export type WebhookDelivery = {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type UsageCounter = {
+  id: string;
+  tenantId?: string;
+  projectId?: string;
+  tokenId: string | null;
+  agentId: string | null;
+  providerId: string | null;
+  usageWindow: string;
+  requestCount: number;
+  tokenCount: number;
+  costUnits: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WebhookSubscription = {
+  id: string;
+  tenantId?: string;
+  projectId?: string;
+  name: string;
+  url: string;
+  secretRef: string | null;
+  eventTypes: string[];
+  status: "active" | "disabled";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BillingPlan = {
+  id: string;
+  name: string;
+  monthlyRequestLimit: number;
+  monthlyTokenLimit: number;
+  monthlyCostLimitCents: number;
+  features: string[];
 };

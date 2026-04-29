@@ -1,74 +1,75 @@
-# FINAL REPORT
-
-交付标准：`docs/需求文档.md`、`ACCEPTANCE.md`
+# FINAL_REPORT
 
 ## 已完成功能
 
-### P0 SaaS/API 上线能力
+- 文档能力对齐：`README.md`、`docs/vibe-claw.md`、`docs/需求文档.md`、`docs/ACCEPTANCE.md`、`docs/api.md`、`docs/developer-api.md` 已同步当前实现能力，包括 SSE、聊天体验、存储配置、Token 生命周期、Webhook、用量计费、后台和 SDK。
 
-- 多租户隔离：核心资源类型、PostgreSQL 表、Token actor、列表/详情 API 均接入 `tenantId` / `projectId`。
-- 幂等写接口：`Idempotency-Key` 覆盖 Run、Agent、Provider、Token、Message、Memory、Lease 写入；相同 body 返回同一响应，不同 body 返回 409。
-- Conversation 串行锁：同一 conversation 的消息写入、上下文读取和模型调用串行处理，锁具备 TTL。
-- 分布式队列：新增 PostgreSQL claim/lease、重试、退避、dead_letter；队列统计展示 dead-letter。
-- 限流/配额/成本：按 token/tenant/project 做窗口请求限制、并发限制、每日 token 额度、月度成本预算，超限返回 429 和剩余额度。
-- Secret 管理：Provider 只保存 `apiKeyRef`；运行时通过 `resolveSecretRef` 解析 env / secret://env / vault:// / kms:// 引用；UI/API 审计不输出明文 key。
-- Webhook 可靠投递：HMAC 签名、delivery 日志、重试、指数退避、dead_letter、手动重放。
-- 流式响应：新增 `POST /v1/agents/:id/messages/stream` SSE 入口，输出 status/delta/done/error，完成后消息落库。
-- 可观测性：结构化请求日志、requestId/tenantId/projectId 链路字段、`/v1/metrics` 指标入口。
-- 数据库迁移治理：新增 `003_saas_readiness.sql`，幂等 migration，并通过本地 PostgreSQL migrate/verify。
-
-### P1 增强闭环
-
-- Protocol Run 从静态回显升级为真实模型调用、JSON 解析/修复、JSON Schema 校验、错误返回。
-- Memory 支持审核状态、按 scope 注入、对话上下文压缩。
-- Provider 支持 Agent/Run 选择并接入运行时；环境变量 Provider 只作为默认 fallback。
-- 后台权限继续通过 API token scopes + tenant/project 隔离实现。
+- 外部开发者文档：新增 `docs/developer-api.md`，覆盖认证、错误码、curl 示例、Webhook 签名、用量/计费/观测和 SDK 入口。
+- API 版本化：新增 `/v1/version`、`docs/API_VERSIONING.md`、`docs/CHANGELOG.md`，明确兼容与弃用策略。
+- 稳定错误响应：所有 `/v1/*` 错误响应统一补充 `code`、`message`、`details`、`requestId`，同时保留旧 `error` 字段。
+- API Token 生命周期：Token 创建只返回一次明文；支持过期时间、IP allowlist、最后使用时间/IP、撤销和 `/v1/tokens/{id}/rotate` 轮换。
+- 持久化用量统计：新增 `UsageCounter` 存储模型，请求数、token、成本按窗口记录；提供 `/v1/usage` 查询。
+- 计费/套餐摘要：新增 `/v1/billing`，返回套餐额度、当前用量和账单草稿摘要。
+- Webhook 订阅：新增 `WebhookSubscription` 存储模型，提供创建/查询/更新接口，并在 Run 终态自动向订阅 endpoint 投递。
+- 可观测性：新增 `/v1/metrics/prometheus` Prometheus 文本指标；保留 JSON metrics、requestId 日志链路和审计事件。
+- 多实例边界：沿用 Postgres queue claim、conversation lock、idempotency record，并补齐数据库用量聚合和 webhook subscription 表。
+- 安全增强：支持环境变量密钥引用、CORS 生产 allowlist、Token IP allowlist、Webhook HMAC 签名和后台敏感字段脱敏显示。
+- 开发者控制台：后台新增“开发者”页面，展示版本/文档/套餐、用量、Webhook 订阅，并可创建 Webhook。
+- 存储配置后台化：后台新增“系统设置”页面，管理员可配置内存/Postgres 模式；配置写入 `.env.local`，数据库连接串掩码展示，重启后生效。
+- SDK：新增 Node 和 Python 最小 client。
+- API 契约测试：扩展测试覆盖错误结构、Token 生命周期、用量/计费、Prometheus、Webhook 订阅和 OpenAPI 新路径。
 
 ## 修改文件
 
-- `ACCEPTANCE.md`
-- `TODO_CHECKLIST.md`
-- `docs/需求文档.md`
-- `db/migrations/003_saas_readiness.sql`
-- `src/api/openapi.ts`
-- `src/api/route-utils.ts`
-- `src/api/routes/agent-routes.ts`
-- `src/api/routes/provider-routes.ts`
-- `src/api/routes/queue-routes.ts`
-- `src/api/routes/token-routes.ts`
-- `src/api/schemas.ts`
-- `src/api/scopes.ts`
-- `src/api/server.ts`
-- `src/core/orchestrator.ts`
-- `src/db/migrate.ts`
-- `src/model/providers.ts`
-- `src/security/tokens.ts`
-- `src/store/memory-store.ts`
-- `src/store/postgres-store.ts`
-- `src/store/store.ts`
-- `src/types.ts`
-- `tests/api.test.ts`
+- `vibe-claw/src/types.ts`
+- `vibe-claw/src/store/store.ts`
+- `vibe-claw/src/store/memory-store.ts`
+- `vibe-claw/src/store/postgres-store.ts`
+- `vibe-claw/src/security/tokens.ts`
+- `vibe-claw/src/api/server.ts`
+- `vibe-claw/src/api/scopes.ts`
+- `vibe-claw/src/api/schemas.ts`
+- `vibe-claw/src/api/openapi.ts`
+- `vibe-claw/src/api/routes/token-routes.ts`
+- `vibe-claw/src/api/admin-page.ts`
+- `vibe-claw/src/config/runtime-config.ts`
+- `vibe-claw/src/index.ts`
+- `vibe-claw/scripts/db-migrate.ts`
+- `vibe-claw/scripts/db-verify.ts`
+- `vibe-claw/db/migrations/004_public_saas_api.sql`
+- `vibe-claw/docs/TODO_CHECKLIST.md`
+- `vibe-claw/docs/developer-api.md`
+- `vibe-claw/docs/API_VERSIONING.md`
+- `vibe-claw/docs/CHANGELOG.md`
+- `vibe-claw/docs/vibe-claw.md`
+- `vibe-claw/docs/需求文档.md`
+- `vibe-claw/docs/ACCEPTANCE.md`
+- `vibe-claw/docs/api.md`
+- `vibe-claw/docs/design.md`
+- `vibe-claw/README.md`
+- `vibe-claw/ACCEPTANCE.md`
+- `vibe-claw/TODO_CHECKLIST.md`
+- `vibe-claw/sdk/node/client.mjs`
+- `vibe-claw/sdk/python/client.py`
+- `vibe-claw/tests/api.test.ts`
 
 ## 测试结果
 
-- `npm run typecheck`：通过。
-- `npm test`：28 个测试通过。
-- `npm run build`：通过。
 - `npm run lint`：通过。
-- `npm run verify`：通过；无数据库 URL 时 `db:verify` 按脚本跳过。
-- `VIBE_CLAW_DATABASE_URL=postgres://xiaofuqi@localhost:5432/vibe_claw npm run db:migrate`：通过。
-- `VIBE_CLAW_DATABASE_URL=postgres://xiaofuqi@localhost:5432/vibe_claw npm run db:verify`：通过。
-- `VIBE_CLAW_DATABASE_URL=postgres://xiaofuqi@localhost:5432/vibe_claw npm test`：28 个测试通过。
+- `npm run typecheck`：通过。
+- `npm run build`：通过。
+- `npm test -- --run tests/api.test.ts`：通过，31 个测试全部通过。
+- `npm run db:verify`：命令执行成功；当前环境缺少 `VIBE_CLAW_DATABASE_URL`/`DATABASE_URL`，因此按脚本逻辑跳过真实数据库验证。
+- 本地服务烟测：临时启动 `PORT=3100 npm run dev`，`/admin`、`/v1/version`、`/v1/usage`、`/v1/metrics/prometheus` 均可访问。
 
 ## 已知问题
 
-- 无阻断 P0 上线能力问题。
-- P1 中 Agent 独立版本表、灰度发布策略、完整 Provider 熔断和评测质量门禁已作为增强方向保留；当前交付已覆盖正式 SaaS/API 的最小上线门槛。
-- `003_saas_readiness.sql` 为前向增量迁移，未提供自动 down migration；回滚需按生产变更流程备份后手工回滚新增列/表。
+- 当前未接入真实 Vault/KMS 服务；已实现密钥引用字段与文档约束，生产部署时需把环境变量/secret ref 接到实际密钥管理系统。
+- `db:verify` 在本机因缺少数据库连接未执行真实 Postgres 迁移验证；迁移文件和 Postgres Store 代码已补齐，但生产上线前应在目标数据库执行一次迁移验证。
+- 计费为最小闭环：已有套餐、额度、用量和账单草稿摘要，尚未接入真实支付、发票和扣费系统。
 
 ## 后续建议
 
-- 将当前内存型用量计数升级为 `usage_counters` 的持久化按日/月聚合。
-- 为 Agent 版本、评测集、灰度发布新增独立数据表和后台页面。
-- 接入真实 Vault/KMS SDK 替换当前等价 SecretResolver 环境变量桥接。
-- 将 `/v1/metrics` 对接 Prometheus/OpenTelemetry exporter。
+- 在 staging Postgres 上设置 `VIBE_CLAW_DATABASE_URL` 后运行 `npm run db:migrate && npm run db:verify && npm run verify`。
+- 接入正式 secret manager/KMS，并将 `apiKeyRef`、`secretRef` 解析迁移到统一 secret provider。
+- 若要正式公开销售，继续补租户自助开通、支付、发票、SLA 告警和客户级用量报表。

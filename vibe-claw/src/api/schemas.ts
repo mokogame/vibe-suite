@@ -105,7 +105,33 @@ export const createTokenSchema = z.object({
   name: z.string().trim().min(1).max(80),
   scopes: z.array(z.string().trim().min(1).max(80)).min(1).max(50).default(["*"]),
   tenantId: z.string().trim().min(1).max(120).optional(),
-  projectId: z.string().trim().min(1).max(120).optional()
+  projectId: z.string().trim().min(1).max(120).optional(),
+  expiresAt: z.string().trim().datetime().nullable().optional(),
+  allowedIps: z.array(z.string().trim().min(1).max(80)).max(100).default([])
+});
+
+export const createWebhookSubscriptionSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  url: z.string().trim().url().max(1000),
+  secretRef: z.string().trim().min(1).max(200).nullable().optional(),
+  eventTypes: z.array(z.string().trim().min(1).max(120)).min(1).max(50).default(["run.completed"])
+});
+
+export const updateWebhookSubscriptionSchema = createWebhookSubscriptionSchema.partial().extend({
+  status: z.enum(["active", "disabled"]).optional()
+}).refine((value) => Object.keys(value).length > 0, "至少提供一个更新字段");
+
+export const replayWebhookSchema = z.object({
+  secret: z.string().trim().min(1).max(200).optional()
+});
+
+export const updateStorageConfigSchema = z.object({
+  storageMode: z.enum(["memory", "postgres"]),
+  databaseUrl: z.string().trim().max(2000).optional()
+});
+
+export const resetDataSchema = z.object({
+  confirm: z.literal("RESET_CURRENT_STORE")
 });
 
 export function parseBody<T>(schema: z.Schema<T>, body: unknown): T {

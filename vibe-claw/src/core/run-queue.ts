@@ -28,6 +28,12 @@ export class RunQueue {
     };
   }
 
+  clearPending(): number {
+    const cleared = this.pending.length;
+    this.pending.length = 0;
+    return cleared;
+  }
+
   private drain(): void {
     while (this.active < this.concurrency && this.pending.length > 0) {
       const task = this.pending.shift();

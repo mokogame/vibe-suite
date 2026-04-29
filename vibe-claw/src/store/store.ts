@@ -1,4 +1,4 @@
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, IdempotencyRecord, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, WebhookDelivery } from "../types.js";
+import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, IdempotencyRecord, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
 
 export type ScopedCreate = Partial<ResourceScope>;
 
@@ -92,6 +92,31 @@ export type CreateArtifactData = ScopedCreate & {
   content: string;
 };
 
+export type CreateUsageCounterData = ScopedCreate & {
+  tokenId?: string | null;
+  agentId?: string | null;
+  providerId?: string | null;
+  usageWindow: string;
+  requestCount?: number;
+  tokenCount?: number;
+  costUnits?: number;
+};
+
+export type CreateWebhookSubscriptionData = ScopedCreate & {
+  name: string;
+  url: string;
+  secretRef?: string | null;
+  eventTypes: string[];
+};
+
+export type UpdateWebhookSubscriptionData = Partial<{
+  name: string;
+  url: string;
+  secretRef: string | null;
+  eventTypes: string[];
+  status: WebhookSubscription["status"];
+}>;
+
 
 export type CreateRunQueueTaskData = ScopedCreate & {
   runId: string;
@@ -112,9 +137,11 @@ export type CreateCompressionAuditData = ScopedCreate & {
 };
 
 export type StoreHealth = { ok: boolean; type: "memory" | "postgres"; error?: string };
+export type ResetStoreResult = { storeType: StoreHealth["type"]; cleared: number };
 
 export type Store = {
   healthCheck(): Promise<StoreHealth>;
+  resetData(): Promise<ResetStoreResult>;
   createAgent(data: CreateAgentData): Promise<Agent>;
   updateAgent(id: string, patch: UpdateAgentData): Promise<Agent | null>;
   listAgents(): Promise<Agent[]>;
@@ -169,6 +196,7 @@ export type Store = {
   addToken(token: ApiToken): Promise<ApiToken>;
   listTokens(): Promise<ApiToken[]>;
   getToken(id: string): Promise<ApiToken | null>;
+  markTokenUsed(id: string, usedAt: string, ip: string | null): Promise<ApiToken | null>;
   revokeToken(id: string, revokedAt: string): Promise<ApiToken | null>;
 
   addAudit(event: AuditEvent): Promise<AuditEvent>;
@@ -182,6 +210,13 @@ export type Store = {
   releaseConversationLock(conversationId: string, holder: string): Promise<void>;
 
   claimQueueTask(workerId: string, lockUntil: string): Promise<RunQueueTask | null>;
+
+  recordUsage(data: CreateUsageCounterData): Promise<UsageCounter>;
+  listUsageCounters(scope?: ResourceScope): Promise<UsageCounter[]>;
+
+  createWebhookSubscription(data: CreateWebhookSubscriptionData): Promise<WebhookSubscription>;
+  updateWebhookSubscription(id: string, patch: UpdateWebhookSubscriptionData): Promise<WebhookSubscription | null>;
+  listWebhookSubscriptions(scope?: ResourceScope): Promise<WebhookSubscription[]>;
 
   createWebhookDelivery(data: Omit<WebhookDelivery, "id" | "createdAt" | "updatedAt">): Promise<WebhookDelivery>;
   updateWebhookDelivery(id: string, patch: Partial<WebhookDelivery>): Promise<WebhookDelivery>;

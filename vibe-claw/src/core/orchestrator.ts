@@ -15,7 +15,7 @@ export class Orchestrator {
     private readonly options: {
       modelTimeoutMs?: number;
       contextTokenBudget?: number;
-      resolveProvider?: (providerId: string | undefined, agentProviderId: string | null) => Promise<ModelProvider>;
+      resolveProvider?: (providerId: string | undefined, agentProviderId: string | null, agentDefaultModel: string) => Promise<ModelProvider>;
       onUsage?: (usage: { actor: AuthActor; agentId: string; provider: string; model: string; totalTokens: number; latencyMs: number }) => Promise<void>;
     } = {}
   ) {}
@@ -88,7 +88,7 @@ export class Orchestrator {
           estimatedTokens: estimateTokens(stepContext.map((item) => item.content).join("\n"))
         });
 
-        const runtimeProvider = await this.resolveProvider(input.providerId, agent.providerId);
+        const runtimeProvider = await this.resolveProvider(input.providerId, agent.providerId, agent.defaultModel);
         await this.transitionRun(runId, "calling_model");
         await this.transitionStep(step.id, "calling_model", "正在调用模型", `${agent.name} 正在通过 ${runtimeProvider.name} 生成回复。`);
         await this.audit(requestId, actor.name, "provider.call.started", "step", step.id, "success", {
@@ -196,9 +196,9 @@ export class Orchestrator {
     return cancelled;
   }
 
-  private async resolveProvider(runProviderId: string | undefined, agentProviderId: string | null): Promise<ModelProvider> {
+  private async resolveProvider(runProviderId: string | undefined, agentProviderId: string | null, agentDefaultModel: string): Promise<ModelProvider> {
     const providerId = runProviderId ?? agentProviderId ?? undefined;
-    if (this.options.resolveProvider) return this.options.resolveProvider(providerId, agentProviderId);
+    if (this.options.resolveProvider) return this.options.resolveProvider(providerId, agentProviderId, agentDefaultModel);
     return this.provider;
   }
 

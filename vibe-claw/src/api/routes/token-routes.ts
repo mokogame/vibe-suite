@@ -21,6 +21,10 @@ export function registerTokenRoutes(app: FastifyInstance, { store }: ApiContext)
         name: body.name,
         scopes: body.scopes ?? ["*"],
         status: "active",
+        expiresAt: body.expiresAt ?? null,
+        allowedIps: body.allowedIps ?? [],
+        lastUsedAt: null,
+        lastUsedIp: null,
         createdAt: nowIso(),
         revokedAt: null
       });
@@ -34,6 +38,29 @@ export function registerTokenRoutes(app: FastifyInstance, { store }: ApiContext)
     const token = await store.revokeToken(existing.id, nowIso());
     if (!token) return reply.status(404).send({ error: "Token 不存在" });
     return { token: sanitizeToken(token) };
+  });
+
+  app.post<{ Params: { id: string } }>("/v1/tokens/:id/rotate", async (request, reply) => {
+    const existing = await store.getToken(request.params.id);
+    if (!existing || !sameScope(existing, scopeOf(request as AuthedRequest))) return reply.status(404).send({ error: "Token 不存在" });
+    await store.revokeToken(existing.id, nowIso());
+    const plainToken = createPlainToken();
+    const rotated = await store.addToken({
+      id: newId("token"),
+      tenantId: existing.tenantId,
+      projectId: existing.projectId,
+      tokenHash: hashToken(plainToken),
+      name: `${existing.name} rotated`,
+      scopes: existing.scopes,
+      status: "active",
+      expiresAt: existing.expiresAt,
+      allowedIps: existing.allowedIps,
+      lastUsedAt: null,
+      lastUsedIp: null,
+      createdAt: nowIso(),
+      revokedAt: null
+    });
+    return reply.status(201).send({ token: sanitizeToken(rotated), plainToken, revokedTokenId: existing.id });
   });
 }
 

@@ -22,8 +22,13 @@ export const openApiDocument = {
       Message: objectSchema({ id: { type: "string" }, conversationId: { type: "string" }, agentId: { type: "string" }, role: { type: "string" }, content: { type: "string" }, runId: { type: ["string", "null"] }, totalTokens: { type: "integer" }, createdAt: { type: "string" } }),
       Protocol: objectSchema({ id: { type: "string" }, agentId: { type: "string" }, name: { type: "string" }, version: { type: "string" }, inputSchema: { type: "object" }, outputSchema: { type: "object" }, status: { type: "string" } }),
       Lease: objectSchema({ id: { type: "string" }, agentId: { type: "string" }, status: { type: "string" }, expiresAt: { type: "string" }, maxCalls: { type: "integer" }, usedCalls: { type: "integer" }, tokenBudget: { type: "integer" }, usedTokens: { type: "integer" }, allowedProtocols: { type: "array", items: { type: "string" } } }),
-      Token: objectSchema({ id: { type: "string" }, name: { type: "string" }, scopes: { type: "array", items: { type: "string" } }, status: { type: "string" }, createdAt: { type: "string" }, revokedAt: { type: ["string", "null"] } }),
+      Token: objectSchema({ id: { type: "string" }, name: { type: "string" }, scopes: { type: "array", items: { type: "string" } }, status: { type: "string" }, expiresAt: { type: ["string", "null"] }, allowedIps: { type: "array", items: { type: "string" } }, lastUsedAt: { type: ["string", "null"] }, lastUsedIp: { type: ["string", "null"] }, createdAt: { type: "string" }, revokedAt: { type: ["string", "null"] } }),
       WebhookDelivery: objectSchema({ id: { type: "string" }, runId: { type: "string" }, url: { type: "string" }, status: { type: "string" }, attempts: { type: "integer" }, maxAttempts: { type: "integer" }, statusCode: { type: ["integer", "null"] }, error: { type: ["string", "null"] } }),
+      WebhookSubscription: objectSchema({ id: { type: "string" }, name: { type: "string" }, url: { type: "string" }, secretRef: { type: ["string", "null"] }, eventTypes: { type: "array", items: { type: "string" } }, status: { type: "string" }, createdAt: { type: "string" }, updatedAt: { type: "string" } }),
+      UsageCounter: objectSchema({ id: { type: "string" }, tokenId: { type: ["string", "null"] }, agentId: { type: ["string", "null"] }, providerId: { type: ["string", "null"] }, usageWindow: { type: "string" }, requestCount: { type: "integer" }, tokenCount: { type: "integer" }, costUnits: { type: "integer" } }),
+      BillingPlan: objectSchema({ id: { type: "string" }, name: { type: "string" }, monthlyRequestLimit: { type: "integer" }, monthlyTokenLimit: { type: "integer" }, monthlyCostLimitCents: { type: "integer" }, features: { type: "array", items: { type: "string" } } }),
+      RuntimeStorageConfig: objectSchema({ storageMode: { type: "string", enum: ["memory", "postgres"] }, activeStoreType: { type: "string" }, databaseUrlConfigured: { type: "boolean" }, databaseUrlMasked: { type: ["string", "null"] }, configPath: { type: "string" }, requiresRestart: { type: "boolean" }, externalEnvActive: { type: "boolean" }, warning: { type: ["string", "null"] } }),
+      ErrorResponse: objectSchema({ error: { type: "string" }, code: { type: "string" }, message: { type: "string" }, details: { type: "object" }, requestId: { type: "string" } }, ["error", "code", "message", "requestId"]),
       Tool: objectSchema({ name: { type: "string" }, description: { type: "string" }, requiredScope: { type: "string" }, inputSchema: { type: "object" } }),
       QueueStats: objectSchema({ pending: { type: "integer" }, active: { type: "integer" }, concurrency: { type: "integer" }, persisted: { type: "object" } }),
       CreateRunInput: objectSchema({ agentIds: { type: "array", items: { type: "string" } }, input: { type: "string" }, providerId: { type: "string" }, context: { type: "array" }, toolCalls: { type: "array" }, callbackUrl: { type: "string" }, callbackSecret: { type: "string" }, mode: { type: "string" } }, ["agentIds", "input"]),
@@ -31,7 +36,10 @@ export const openApiDocument = {
       CreateProtocolInput: objectSchema({ name: { type: "string" }, version: { type: "string" }, inputSchema: { type: "object" }, outputSchema: { type: "object" } }, ["name", "version", "inputSchema", "outputSchema"]),
       CreateProtocolRunInput: objectSchema({ conversationId: { type: "string" }, protocol: { type: "string" }, input: { type: "object" }, context: { type: "array" }, leaseId: { type: "string" } }, ["protocol", "input"]),
       CreateMemoryInput: objectSchema({ type: { type: "string" }, scope: { type: "string" }, summary: { type: "string" }, content: { type: "string" }, source: { type: "string" } }, ["type", "summary", "content"]),
-      CreateLeaseInput: objectSchema({ expiresAt: { type: "string" }, maxCalls: { type: "integer" }, tokenBudget: { type: "integer" }, allowedProtocols: { type: "array", items: { type: "string" } } }, ["expiresAt", "maxCalls", "tokenBudget"])
+      CreateLeaseInput: objectSchema({ expiresAt: { type: "string" }, maxCalls: { type: "integer" }, tokenBudget: { type: "integer" }, allowedProtocols: { type: "array", items: { type: "string" } } }, ["expiresAt", "maxCalls", "tokenBudget"]),
+      CreateWebhookSubscriptionInput: objectSchema({ name: { type: "string" }, url: { type: "string" }, secretRef: { type: ["string", "null"] }, eventTypes: { type: "array", items: { type: "string" } } }, ["name", "url"]),
+      UpdateStorageConfigInput: objectSchema({ storageMode: { type: "string", enum: ["memory", "postgres"] }, databaseUrl: { type: "string" } }, ["storageMode"]),
+      ResetDataInput: objectSchema({ confirm: { type: "string", const: "RESET_CURRENT_STORE" } }, ["confirm"])
     }
   },
   paths: {
@@ -52,12 +60,24 @@ export const openApiDocument = {
     "/v1/runs/{id}": { get: { summary: "Run 详情", responses: { "200": ok("Run", objectSchema({ run: ref("Run"), events: { type: "array", items: ref("RunEvent") } })) } } },
     "/v1/queue": { get: { summary: "队列状态", responses: { "200": ok("队列", objectSchema({ queue: ref("QueueStats") })) } } },
     "/v1/metrics": { get: { summary: "基础指标", responses: { "200": ok("指标") } } },
+    "/v1/metrics/prometheus": { get: { summary: "Prometheus 文本指标", responses: { "200": { description: "Prometheus text/plain metrics", content: { "text/plain": { schema: { type: "string" } } } } } } },
+    "/v1/version": { get: { summary: "API 版本和兼容策略", responses: { "200": ok("版本信息") } } },
+    "/v1/developer-docs": { get: { summary: "开发者文档索引", responses: { "200": ok("文档索引") } } },
+    "/v1/admin/storage-config": { get: { summary: "读取管理员存储配置", responses: { "200": ok("存储配置", objectSchema({ config: ref("RuntimeStorageConfig") })) } }, post: { summary: "保存管理员存储配置", requestBody: { content: { "application/json": { schema: ref("UpdateStorageConfigInput") } } }, responses: { "200": ok("存储配置已保存", objectSchema({ config: ref("RuntimeStorageConfig"), requiresRestart: { type: "boolean" }, message: { type: "string" } })) } } },
+    "/v1/admin/restart": { post: { summary: "请求服务重启", responses: { "200": ok("重启请求", objectSchema({ ok: { type: "boolean" }, restartScheduled: { type: "boolean" }, message: { type: "string" } })) } } },
+    "/v1/admin/reset-data": { post: { summary: "重置当前运行存储的数据", requestBody: { content: { "application/json": { schema: ref("ResetDataInput") } } }, responses: { "200": ok("已重置当前存储", objectSchema({ ok: { type: "boolean" }, storeType: { type: "string" }, cleared: { type: "integer" }, clearedQueueTasks: { type: "integer" }, message: { type: "string" } })) } } },
+    "/v1/usage": { get: { summary: "用量统计", responses: { "200": ok("用量", objectSchema({ usage: { type: "array", items: ref("UsageCounter") }, summary: { type: "object" } })) } } },
+    "/v1/billing": { get: { summary: "套餐和账单摘要", responses: { "200": ok("计费", objectSchema({ plan: ref("BillingPlan"), usage: { type: "object" }, invoices: { type: "array" } })) } } },
+    "/v1/webhook-subscriptions": { get: { summary: "Webhook 订阅列表", responses: { "200": ok("Webhook 订阅", objectSchema({ subscriptions: { type: "array", items: ref("WebhookSubscription") } })) } }, post: { summary: "创建 Webhook 订阅", requestBody: { content: { "application/json": { schema: ref("CreateWebhookSubscriptionInput") } } }, responses: { "201": ok("Webhook 订阅", objectSchema({ subscription: ref("WebhookSubscription") })) } } },
+    "/v1/webhook-subscriptions/{id}": { patch: { summary: "更新 Webhook 订阅", responses: { "200": ok("Webhook 订阅", objectSchema({ subscription: ref("WebhookSubscription") })) } } },
     "/v1/webhook-deliveries": { get: { summary: "Webhook 投递日志", responses: { "200": ok("投递日志", objectSchema({ deliveries: { type: "array", items: ref("WebhookDelivery") } })) } } },
     "/v1/webhook-deliveries/{id}/replay": { post: { summary: "手动重放 Webhook", responses: { "200": ok("投递结果", objectSchema({ delivery: ref("WebhookDelivery") })) } } },
     "/v1/providers": { get: { summary: "Provider 列表", responses: { "200": ok("Provider", objectSchema({ providers: { type: "array", items: ref("Provider") } })) } }, post: { summary: "创建 Provider", responses: { "201": ok("Provider", objectSchema({ provider: ref("Provider") })) } } },
     "/v1/providers/{id}": { get: { summary: "Provider 详情", responses: { "200": ok("Provider", objectSchema({ provider: ref("Provider") })) } }, patch: { summary: "更新 Provider", responses: { "200": ok("Provider", objectSchema({ provider: ref("Provider") })) } } },
     "/v1/tools": { get: { summary: "工具列表", responses: { "200": ok("工具", objectSchema({ tools: { type: "array", items: ref("Tool") } })) } } },
     "/v1/tokens": { get: { summary: "Token 列表", responses: { "200": ok("Token", objectSchema({ tokens: { type: "array", items: ref("Token") } })) } }, post: { summary: "创建 Token", responses: { "201": ok("Token") } } },
+    "/v1/tokens/{id}/rotate": { post: { summary: "轮换 Token，仅返回一次新明文", responses: { "201": ok("新 Token") } } },
+    "/v1/tokens/{id}/revoke": { post: { summary: "撤销 Token", responses: { "200": ok("Token") } } },
     "/v1/audit-events": { get: { summary: "审计事件", responses: { "200": ok("审计") } } }
   }
 };

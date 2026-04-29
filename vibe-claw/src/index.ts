@@ -1,4 +1,7 @@
 import { createServer } from "./api/server.js";
+import { loadRuntimeEnv } from "./config/runtime-config.js";
+
+await loadRuntimeEnv();
 
 const port = Number(process.env.PORT ?? 3100);
 const host = process.env.HOST ?? "0.0.0.0";

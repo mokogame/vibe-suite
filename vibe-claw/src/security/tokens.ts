@@ -14,7 +14,7 @@ export function createPlainToken(): string {
 export class TokenRegistry {
   constructor(private readonly store: Store) {}
 
-  async registerPlainToken(name: string, token: string, scopes: string[] = ["*"], scope: ResourceScope = {}): Promise<ApiToken> {
+  async registerPlainToken(name: string, token: string, scopes: string[] = ["*"], scope: ResourceScope = {}, options: { expiresAt?: string | null; allowedIps?: string[] } = {}): Promise<ApiToken> {
     return this.store.addToken({
       id: newId("token"),
       tenantId: scope.tenantId ?? DEFAULT_TENANT_ID,
@@ -23,18 +23,22 @@ export class TokenRegistry {
       name,
       scopes,
       status: "active",
+      expiresAt: options.expiresAt ?? null,
+      allowedIps: options.allowedIps ?? [],
+      lastUsedAt: null,
+      lastUsedIp: null,
       createdAt: nowIso(),
       revokedAt: null
     });
   }
 
-  async createToken(name: string, scopes: string[], scope: ResourceScope = {}): Promise<{ token: ApiToken; plainToken: string }> {
+  async createToken(name: string, scopes: string[], scope: ResourceScope = {}, options: { expiresAt?: string | null; allowedIps?: string[] } = {}): Promise<{ token: ApiToken; plainToken: string }> {
     const plainToken = createPlainToken();
-    const token = await this.registerPlainToken(name, plainToken, scopes, scope);
+    const token = await this.registerPlainToken(name, plainToken, scopes, scope, options);
     return { token, plainToken };
   }
 
-  async authenticate(token: string, requiredScope: string): Promise<AuthActor | null> {
+  async authenticate(token: string, requiredScope: string, ip?: string | null): Promise<AuthActor | null> {
     const incoming = Buffer.from(hashToken(token));
     const tokens = await this.store.listTokens();
     const matched = tokens.find((candidate) => {
@@ -43,7 +47,10 @@ export class TokenRegistry {
     });
 
     if (!matched || matched.status !== "active") return null;
+    if (matched.expiresAt && matched.expiresAt <= nowIso()) return null;
+    if (matched.allowedIps.length > 0 && (!ip || !matched.allowedIps.includes(ip))) return null;
     if (!hasScope(matched.scopes, requiredScope)) return null;
+    await this.store.markTokenUsed(matched.id, nowIso(), ip ?? null);
     return {
       tokenId: matched.id,
       name: matched.name,
