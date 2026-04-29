@@ -76,7 +76,7 @@ Create an Agent:
 curl -s -X POST "$BASE_URL/v1/agents" \
   -H "Authorization: Bearer $VIBE_CLAW_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Support Bot","instruction":"Answer clearly.","defaultModel":"deepseek-chat","providerId":"provider_xxx"}'
+  -d '{"name":"Support Bot","instruction":"Answer clearly.","defaultModel":"deepseek-chat","providerId":"provider_xxx","contract":{"role":"Support Agent","mission":"Resolve customer questions clearly","style":"concise","version":"1"}}'
 ```
 
 Send a message:
@@ -152,7 +152,7 @@ GET  /v1/agents/{agentId}/memories
 PATCH /v1/memories/{memoryId}
 ```
 
-Memory is scoped by tenant/project/agent. It may be injected into future model context and is auditable.
+Memory is scoped by tenant/project/agent. Runtime recall ranks active memories by relevance, importance, recency and confidence before injecting them into model context. Sensitive external context is redacted before reaching the provider, and each context build records kept/summarized/dropped audit metadata.
 
 ## Protocol Runs
 

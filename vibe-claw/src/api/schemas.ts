@@ -4,6 +4,18 @@ export const createAgentSchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(500).optional(),
   instruction: z.string().trim().min(1).max(4000),
+  contract: z.object({
+    role: z.string().trim().min(1).max(200).optional(),
+    mission: z.string().trim().min(1).max(2000).optional(),
+    boundaries: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+    style: z.string().trim().min(1).max(1000).optional(),
+    outputContract: z.string().trim().min(1).max(2000).optional(),
+    toolPolicy: z.string().trim().min(1).max(2000).optional(),
+    memoryPolicy: z.string().trim().min(1).max(2000).optional(),
+    handoffPolicy: z.string().trim().min(1).max(2000).optional(),
+    safetyPolicy: z.string().trim().min(1).max(2000).optional(),
+    version: z.string().trim().min(1).max(40).optional()
+  }).optional(),
   defaultModel: z.string().trim().min(1).max(120).optional(),
   providerId: z.string().trim().min(1).nullable().optional()
 });
@@ -68,7 +80,12 @@ export const createMemorySchema = z.object({
   scope: z.enum(["agent", "conversation", "tenant", "lease"]).default("agent"),
   summary: z.string().trim().min(1).max(500),
   content: z.string().trim().min(1).max(20000),
-  source: z.string().trim().min(1).max(120).default("api")
+  source: z.string().trim().min(1).max(120).default("api"),
+  importance: z.number().min(0).max(1).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  tags: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+  provenance: z.string().trim().min(1).max(500).optional(),
+  expiresAt: z.string().trim().datetime().nullable().optional()
 });
 
 export const createLeaseSchema = z.object({

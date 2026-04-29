@@ -1,4 +1,4 @@
-import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, IdempotencyRecord, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
+import type { Agent, AgentContract, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, AgentStatus, ApiToken, AuditEvent, CompressionAudit, CompressionStrategy, IdempotencyRecord, MemoryScope, MemoryType, ModelProviderConfig, ProviderStatus, ProviderType, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
 
 export type ScopedCreate = Partial<ResourceScope>;
 
@@ -6,6 +6,7 @@ export type CreateAgentData = ScopedCreate & {
   name: string;
   description?: string;
   instruction: string;
+  contract?: Partial<AgentContract>;
   defaultModel?: string;
   providerId?: string | null;
 };
@@ -14,6 +15,7 @@ export type UpdateAgentData = Partial<{
   name: string;
   description: string;
   instruction: string;
+  contract: Partial<AgentContract>;
   defaultModel: string;
   providerId: string | null;
   status: AgentStatus;
@@ -48,6 +50,11 @@ export type CreateMemoryData = ScopedCreate & {
   content: string;
   source: string;
   sourceRunId?: string | null;
+  importance?: number;
+  confidence?: number;
+  tags?: string[];
+  provenance?: string;
+  expiresAt?: string | null;
   createdBy: string;
 };
 

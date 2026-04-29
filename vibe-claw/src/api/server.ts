@@ -1,7 +1,6 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import { newId, nowIso } from "../core/ids.js";
-import { compressContext } from "../core/compression.js";
 import { validateJsonSchema } from "../core/json-schema.js";
 import { Orchestrator } from "../core/orchestrator.js";
 import { RunQueue } from "../core/run-queue.js";

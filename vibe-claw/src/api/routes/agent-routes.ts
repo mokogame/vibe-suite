@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { newId, nowIso } from "../../core/ids.js";
-import { compressContext } from "../../core/compression.js";
+import { buildAgentContext } from "../../core/context-builder.js";
+import { compilePromptMessages } from "../../core/prompt-compiler.js";
 import { validateJsonSchema } from "../../core/json-schema.js";
 import type { ApiContext, AuthedRequest } from "../context.js";
 import { actorOf, filterScope, scopeOf, sameScope, withIdempotency } from "../route-utils.js";
@@ -44,20 +45,23 @@ export function registerAgentRoutes(app: FastifyInstance, { store, orchestrator 
       const memoryEvent = await store.addEvent({ ...scope, runId: run.id, stepId: null, status: "retrieving_memory", title: "正在检索记忆", summary: "正在读取 Agent 相关长期记忆。", visible: true });
       await emit?.("status", { status: "retrieving_memory", runId: run.id, event: memoryEvent });
 
-      const memories = filterScope(await store.listMemories(agent.id), scope).filter((memory) => memory.status === "active");
-      const memoryContext = memories.map((memory) => ({ source: "memory" as const, content: memory.type + ":" + memory.summary + "\n" + memory.content, priority: memory.type === "profile" ? 90 : 65 }));
-      const historyContext = historyMessages.slice(-12).map((message) => ({
-        source: message.role,
-        content: `历史消息(${message.role})：${message.content}`,
-        priority: message.role === "agent" ? 72 : 68
-      }));
       const externalContext = normalizeContext(body.context ?? []);
-      const compressed = compressContext([...memoryContext, ...historyContext, ...externalContext], body.compression ?? "hybrid", Number(process.env.VIBE_CLAW_CONTEXT_TOKEN_BUDGET ?? 6000));
-      await store.addCompressionAudit({ ...scope, runId: run.id, strategy: body.compression ?? "hybrid", strategyVersion: "v1", originalTokens: compressed.originalTokens, compressedTokens: compressed.compressedTokens, kept: compressed.kept, summarized: compressed.summarized, dropped: compressed.dropped });
-      await store.addAudit({ id: newId("audit"), ...scope, requestId, actor: actor.name, action: "memory.injected", targetType: "run", targetId: run.id, status: "success", metadata: { memoryIds: memories.map((memory) => memory.id), contextCount: compressed.context.length, sourceIp: request.ip, userAgent: request.headers["user-agent"] ?? null }, createdAt: nowIso() });
-      await emit?.("status", { status: "building_context", runId: run.id, contextCount: compressed.context.length });
+      const memories = filterScope(await store.listMemories(agent.id), scope).filter((memory) => memory.status === "active");
+      const builtContext = buildAgentContext({
+        agent,
+        currentMessage: body.message,
+        historyMessages,
+        memories,
+        externalContext,
+        strategy: body.compression ?? "hybrid",
+        budgetTokens: Number(process.env.VIBE_CLAW_CONTEXT_TOKEN_BUDGET ?? 6000)
+      });
+      const promptMessages = compilePromptMessages(builtContext.blocks);
+      await store.addCompressionAudit({ ...scope, runId: run.id, strategy: body.compression ?? "hybrid", strategyVersion: "context-builder-v1", originalTokens: builtContext.audit.originalTokens, compressedTokens: builtContext.audit.compressedTokens, kept: builtContext.audit.kept, summarized: builtContext.audit.summarized, dropped: builtContext.audit.dropped });
+      await store.addAudit({ id: newId("audit"), ...scope, requestId, actor: actor.name, action: "memory.injected", targetType: "run", targetId: run.id, status: "success", metadata: { memoryIds: builtContext.blocks.filter((block) => block.kind === "memory").map((block) => block.id.replace("memory:", "")), contextCount: builtContext.blocks.length, contextAudit: builtContext.audit, sourceIp: request.ip, userAgent: request.headers["user-agent"] ?? null }, createdAt: nowIso() });
+      await emit?.("status", { status: "building_context", runId: run.id, contextCount: builtContext.blocks.length });
 
-      const result = await orchestrator.executeRun(requestId, actor, run.id, { agentIds: [agent.id], input: body.message, context: compressed.context });
+      const result = await orchestrator.executeRun(requestId, actor, run.id, { agentIds: [agent.id], input: body.message, context: builtContext.legacyContext, messages: promptMessages, contextAudit: builtContext.audit });
       const failed = result.run.status !== "completed";
       const message = await store.addMessage({
         ...scope,

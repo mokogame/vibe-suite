@@ -5,6 +5,29 @@ const { encryptText, decryptText } = require("./security");
 const { invalidateUserReadCaches } = require("./read-cache");
 
 const STORE_KEY = process.env.MESSAGE_STORE_KEY || "vibe-im-local-message-store-key-change-me";
+
+function stripInternalContextLeak(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  let index = 0;
+  let stripped = false;
+  const internalMeta = /^\[(system|developer|memory|history|summary|external|attachment|tool|user);[^\]]+\]\s*$/i;
+  const internalContent = /^(历史消息|长期记忆|滚动摘要|上下文摘要|内部历史消息|内部长期记忆|内部滚动摘要|调用方提供的内部上下文)[（(]/;
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+    if (internalMeta.test(line) || /^reason\s*[:：]/i.test(line) || internalContent.test(line)) {
+      stripped = true;
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return stripped ? lines.slice(index).join("\n").trimStart() : String(text || "");
+}
+
 function rowUser(prefix = "") {
   return `
     ${prefix}id AS id,
@@ -240,6 +263,7 @@ function listConversations(userId) {
     let latestPlain = row.latest_type === "text" && row.latest_content
       ? decryptText(JSON.parse(row.latest_content), STORE_KEY)
       : row.latest_type ? `[${row.latest_type}]` : "";
+    latestPlain = stripInternalContextLeak(latestPlain);
     const other = row.type === "direct" ? getDirectOtherUser(userId, row.id) : null;
     return {
       id: row.id,
@@ -273,18 +297,80 @@ function getDirectOtherUser(userId, conversationId) {
 function listMembers(userId, conversationId) {
   if (!getConversationForUser(userId, conversationId)) throw new Error("Conversation not found");
   return getDb().prepare(`
-    SELECT u.*, cm.role, cm.joined_at
+    SELECT u.*, cm.role AS member_role, cm.joined_at
     FROM conversation_members cm
     JOIN users u ON u.id = cm.user_id
     WHERE cm.conversation_id = ?
     ORDER BY cm.joined_at ASC
-  `).all(conversationId).map(row => ({ ...publicUser(row), memberRole: row.role, joinedAt: row.joined_at }));
+  `).all(conversationId).map(row => ({ ...publicUser(row), memberRole: row.member_role, joinedAt: row.joined_at }));
 }
 
 function extractMentions(text) {
   const usernames = Array.from(new Set(String(text || "").match(/@([a-zA-Z0-9_]+)/g)?.map(v => v.slice(1)) || []));
   if (!usernames.length) return [];
   return usernames.map(username => getUserByUsername(username)).filter(Boolean).map(publicUser);
+}
+
+function normalizeMentionInput(conversationId, mentions = [], fallbackText = "") {
+  const byUserId = new Map();
+  for (const raw of Array.isArray(mentions) ? mentions : []) {
+    const userId = String(raw.userId || raw.id || "").trim();
+    if (!userId || byUserId.has(userId)) continue;
+    const row = getDb().prepare(`
+      SELECT u.*, a.agent_id
+      FROM conversation_members cm
+      JOIN users u ON u.id = cm.user_id
+      LEFT JOIN vibe_claw_agents a ON a.user_id = u.id
+      WHERE cm.conversation_id = ? AND u.id = ?
+      LIMIT 1
+    `).get(conversationId, userId);
+    if (!row || row.status !== "active") continue;
+    byUserId.set(row.id, {
+      id: row.id,
+      username: row.username,
+      displayName: row.display_name,
+      role: row.role,
+      targetType: row.role === "agent" ? "agent" : "user",
+      agentId: row.agent_id || null
+    });
+  }
+
+  if (!byUserId.size) {
+    for (const user of extractMentions(fallbackText)) {
+      const row = getDb().prepare(`
+        SELECT u.*, a.agent_id
+        FROM conversation_members cm
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN vibe_claw_agents a ON a.user_id = u.id
+        WHERE cm.conversation_id = ? AND u.id = ?
+        LIMIT 1
+      `).get(conversationId, user.id);
+      if (!row || row.status !== "active") continue;
+      byUserId.set(row.id, {
+        id: row.id,
+        username: row.username,
+        displayName: row.display_name,
+        role: row.role,
+        targetType: row.role === "agent" ? "agent" : "user",
+        agentId: row.agent_id || null
+      });
+    }
+  }
+
+  return Array.from(byUserId.values()).map(publicMention);
+}
+
+function publicMention(row) {
+  const targetUserId = row.userId || row.target_user_id || row.id;
+  return {
+    id: targetUserId,
+    userId: targetUserId,
+    username: row.username,
+    displayName: row.displayName || row.display_name,
+    role: row.role,
+    type: row.targetType || row.target_type || (row.role === "agent" ? "agent" : "user"),
+    agentId: row.agentId || row.target_agent_id || null
+  };
 }
 
 function saveAttachment(ownerId, body) {
@@ -319,7 +405,7 @@ function createMessage(senderId, conversationId, input) {
   let mentions = [];
   if (input.type === "text") {
     const plain = input.text || "";
-    mentions = extractMentions(plain);
+    mentions = normalizeMentionInput(conversationId, input.mentions, plain);
     content = JSON.stringify(encryptText(plain, STORE_KEY));
   } else {
     attachmentId = input.attachmentId;
@@ -333,6 +419,12 @@ function createMessage(senderId, conversationId, input) {
       INSERT INTO messages (id, conversation_id, sender_id, seq, type, content, attachment_id, reply_to_id, mentions_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(messageId, conversationId, senderId, seq, input.type, content, attachmentId, input.replyToId || null, JSON.stringify(mentions), createdAt);
+    for (const mention of mentions) {
+      database.prepare(`
+        INSERT INTO message_mentions (id, message_id, conversation_id, target_user_id, target_type, target_agent_id, username, display_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id(), messageId, conversationId, mention.userId, mention.type, mention.agentId || null, mention.username, mention.displayName, createdAt);
+    }
     database.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(createdAt, conversationId);
   });
   return getMessage(messageId);
@@ -345,8 +437,17 @@ function updateTextMessage(senderId, messageId, text) {
   if (row.sender_id !== senderId) throw new Error("Only sender can update message");
   if (row.type !== "text") throw new Error("Only text messages can be updated");
   const content = JSON.stringify(encryptText(text || "", STORE_KEY));
-  const mentions = extractMentions(text || "");
-  database.prepare("UPDATE messages SET content = ?, mentions_json = ? WHERE id = ?").run(content, JSON.stringify(mentions), messageId);
+  const mentions = normalizeMentionInput(row.conversation_id, [], text || "");
+  transaction(() => {
+    database.prepare("UPDATE messages SET content = ?, mentions_json = ? WHERE id = ?").run(content, JSON.stringify(mentions), messageId);
+    database.prepare("DELETE FROM message_mentions WHERE message_id = ?").run(messageId);
+    for (const mention of mentions) {
+      database.prepare(`
+        INSERT INTO message_mentions (id, message_id, conversation_id, target_user_id, target_type, target_agent_id, username, display_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id(), messageId, row.conversation_id, mention.userId, mention.type, mention.agentId || null, mention.username, mention.displayName, now());
+    }
+  });
   return getMessage(messageId);
 }
 
@@ -420,7 +521,14 @@ function serializeMessage(row, transportKey) {
     encryptedText = encryptText(plain, transportKey);
   }
   const conversation = getDb().prepare("SELECT type FROM conversations WHERE id = ?").get(row.conversation_id);
-  const mentions = JSON.parse(row.mentions_json || "[]");
+  const persistedMentions = getDb().prepare(`
+    SELECT mm.*, u.role
+    FROM message_mentions mm
+    JOIN users u ON u.id = mm.target_user_id
+    WHERE mm.message_id = ?
+    ORDER BY mm.created_at ASC
+  `).all(row.id).map(publicMention);
+  const mentions = persistedMentions.length ? persistedMentions : JSON.parse(row.mentions_json || "[]");
   return {
     id: row.id,
     conversationId: row.conversation_id,
@@ -458,6 +566,43 @@ function listMessages(userId, conversationId, transportKey, afterSeq = 0, limit 
   `).all(conversationId, Number(afterSeq), Number(limit)).map(row => serializeMessage(row, transportKey));
 }
 
+function listRecentPlainMessages(userId, conversationId, limit = 20) {
+  if (!getConversationForUser(userId, conversationId)) throw new Error("Conversation not found");
+  return getDb().prepare(`
+    SELECT m.*, u.username, u.display_name, u.role
+    FROM messages m
+    JOIN users u ON u.id = m.sender_id
+    WHERE m.conversation_id = ?
+    ORDER BY m.seq DESC
+    LIMIT ?
+  `).all(conversationId, Number(limit)).reverse().map(row => {
+    let text = "";
+    if (row.type === "text" && row.content) {
+      text = stripInternalContextLeak(decryptText(JSON.parse(row.content), STORE_KEY));
+    } else if (row.type === "system") {
+      text = row.content || "";
+    } else if (row.type === "image") {
+      text = "[图片]";
+    } else if (row.type === "file") {
+      text = "[文件]";
+    }
+    return {
+      id: row.id,
+      seq: row.seq,
+      type: row.type,
+      sender: {
+        id: row.sender_id,
+        username: row.username,
+        displayName: row.display_name,
+        role: row.role
+      },
+      text,
+      mentions: JSON.parse(row.mentions_json || "[]"),
+      createdAt: row.created_at
+    };
+  });
+}
+
 function markRead(userId, conversationId, seq) {
   getDb().prepare(`
     UPDATE conversation_members
@@ -487,5 +632,6 @@ module.exports = {
   getMessage,
   serializeMessage,
   listMessages,
+  listRecentPlainMessages,
   markRead
 };

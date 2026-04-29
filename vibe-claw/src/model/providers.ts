@@ -1,4 +1,4 @@
-import type { ContextItem, ModelCallInput, ModelCallOutput } from "../types.js";
+import type { ContextItem, ModelCallInput, ModelCallOutput, PromptMessage } from "../types.js";
 
 export interface ModelProvider {
   readonly name: string;
@@ -18,7 +18,8 @@ export class MockModelProvider implements ModelProvider {
   readonly name = "mock";
 
   async call(input: ModelCallInput): Promise<ModelCallOutput> {
-    const contextText = input.context.length > 0 ? `\n上下文：${formatContext(input.context)}` : "";
+    const compiled = input.messages?.map((message) => `[${message.role}] ${message.content}`).join(" | ");
+    const contextText = compiled ? `\n上下文：${compiled}` : input.context.length > 0 ? `\n上下文：${formatContext(input.context)}` : "";
     const text = `${input.agent.name}：${input.agent.instruction}\n收到：${input.input}${contextText}`;
     const inputTokens = estimateTokens(`${input.agent.instruction}\n${input.input}\n${formatContext(input.context)}`);
     const outputTokens = estimateTokens(text);
@@ -75,11 +76,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
         },
         body: JSON.stringify({
           model,
-          messages: [
-            { role: "system", content: input.agent.instruction },
-            ...input.context.map((item) => ({ role: "system", content: renderContextItem(item) })),
-            { role: "user", content: input.input }
-          ],
+          messages: normalizeProviderMessages(input.messages ?? fallbackMessages(input)),
           temperature: 0.2
         })
       });
@@ -142,6 +139,22 @@ function formatContext(context: ContextItem[]): string {
 function renderContextItem(item: ContextItem): string {
   const content = item.sensitive ? "[已脱敏敏感上下文]" : item.content;
   return `[${item.source}; priority=${item.priority}] ${content}`;
+}
+
+function fallbackMessages(input: ModelCallInput): PromptMessage[] {
+  return [
+    { role: "system", content: input.agent.instruction },
+    ...input.context.map((item) => ({ role: item.source === "agent" ? "assistant" as const : "user" as const, content: renderContextItem(item) })),
+    { role: "user", content: input.input }
+  ];
+}
+
+function normalizeProviderMessages(messages: PromptMessage[]): Array<{ role: "system" | "user" | "assistant"; content: string; name?: string }> {
+  return messages.map((message) => {
+    if (message.role === "developer") return { role: "system", content: `[developer]\n${message.content}`, name: message.name };
+    if (message.role === "tool") return { role: "user", content: `[tool]\n${message.content}`, name: message.name };
+    return { role: message.role, content: message.content, name: message.name };
+  });
 }
 
 function isRetryable(error: unknown): boolean {

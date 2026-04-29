@@ -22,18 +22,19 @@ Vibe Claw 与 Vibe IM 的关系：
 
 ## 当前实现快照
 
-截至 2026-04-29，Vibe Claw 已具备面向正式对外 SaaS/API 服务的最小闭环能力，并已与 `docs/需求文档.md`、`docs/ACCEPTANCE.md`、`docs/api.md`、`docs/developer-api.md`、`README.md` 保持同口径：
+截至 2026-04-30，Vibe Claw 已具备面向正式对外 SaaS/API 服务的最小闭环能力，并已与 `docs/阶段性需求文档.md`、`docs/ACCEPTANCE.md`、`docs/api.md`、`docs/developer-api.md`、`README.md` 保持同口径：
 
 - 独立服务：`vibe-claw` 在 `vibe-suite` 仓库内作为独立服务目录交付，拥有独立 Fastify API、后台管理页、迁移、测试和构建命令。
 - 独立数据：支持内存存储和 PostgreSQL 存储；运行时只加载当前选定存储，不在内存和数据库之间迁移或污染数据。PostgreSQL 迁移已覆盖 Provider、Agent、Run、Conversation、Message、Memory、Lease、Token、Audit、Queue、Webhook、幂等记录、会话锁、用量和开发者 API 相关表。
 - 存储运维：后台系统设置支持读取当前运行存储、配置内存/PostgreSQL 模式、保存 `.env.local`、请求服务重启、重置当前运行存储数据；重置只清当前存储业务数据，不切换模式、不迁移数据。
 - 模型接入：支持本地 mock provider、OpenAI-compatible provider、DeepSeek 配置；Provider 通过 `apiKeyRef` 引用密钥，不在后台明文展示。
-- Agent 管理：支持创建、查询、修改、归档 Agent；Agent 可绑定指定 Provider 和默认模型。
+- Agent 管理：支持创建、查询、修改、归档 Agent；Agent 可绑定指定 Provider 和默认模型；Agent 已升级为结构化职责契约单元，支持 `role`、`mission`、`boundaries`、`style`、`outputContract`、`toolPolicy`、`memoryPolicy`、`handoffPolicy`、`safetyPolicy`、`version`。
 - 普通对话：支持 `POST /v1/agents/:id/messages`，自动保存会话、消息、Run、事件、token 使用和上下文压缩记录。
 - 流式入口：支持 `POST /v1/agents/:id/messages/stream` 的 SSE 事件流，事件包含 `status`、`conversation`、`user_message_created`、`run_created`、`delta`、`assistant_message_completed`、`done`、`error`。
 - 协议运行：支持注册协议、执行 protocol run、输入 JSON Schema 校验、模型输出 JSON 解析和输出 JSON Schema 校验。
-- 记忆系统：支持 Agent 维度记忆写入、查询、状态更新、作用域隔离和模型上下文注入。
-- 上下文压缩：支持 `none`、`recent_only`、`rolling_summary`、`hybrid`、`protocol_minimal` 等策略，并记录压缩审计。
+- 记忆系统：支持 Agent 维度记忆写入、查询、状态更新、作用域隔离和模型上下文注入；记忆包含 `importance`、`confidence`、`tags`、`provenance`、`expiresAt`、`lastAccessedAt`，模型调用前按相关性、重要性、时间、可信度排序召回。
+- 上下文压缩：支持 `none`、`recent_only`、`rolling_summary`、`hybrid`、`protocol_minimal` 等策略；Context Builder 统一构建 system/developer/memory/history/summary/tool/attachment/user 上下文块，记录 kept/summarized/dropped 和注入原因。
+- Prompt 编译：模型调用使用语义化 messages，不再把全部上下文塞入单一 system；OpenAI-compatible provider 对 developer/tool role 做兼容映射。
 - 租约：支持为 Agent 创建租约，租约可绑定过期时间、token 预算和调用限制字段。
 - API token 生命周期：支持创建、查询、撤销、轮换、过期时间、IP allowlist、最后使用时间和最后使用 IP；创建和轮换只返回一次明文 token，列表不暴露 token hash。
 - 多租户隔离：API token 带 `tenantId`、`projectId` 和 scopes；核心资源按 tenant/project 过滤，避免不同接入方互相读取。

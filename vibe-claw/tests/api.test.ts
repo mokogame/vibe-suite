@@ -3,8 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { defaultAgentContract } from "../src/core/agent-contract.js";
+import { buildAgentContext } from "../src/core/context-builder.js";
 import { createServer } from "../src/api/server.js";
 import { MemoryStore } from "../src/store/memory-store.js";
+import type { Agent, AgentMemory, AgentMessage } from "../src/types.js";
 
 const auth = { authorization: "Bearer test-token" };
 
@@ -31,6 +34,8 @@ describe("Vibe Claw API", () => {
     expect(response.json().paths).toHaveProperty("/v1/webhook-subscriptions");
     expect(response.json().paths).toHaveProperty("/v1/admin/reset-data");
     expect(response.json().components.schemas).toHaveProperty("ErrorResponse");
+    expect(response.json().components.schemas).toHaveProperty("AgentContract");
+    expect(response.json().paths["/v1/agents"].post.requestBody.content["application/json"].schema.properties).toHaveProperty("contract");
   });
 
   it("rejects protected API without token", async () => {
@@ -87,6 +92,113 @@ describe("Vibe Claw API", () => {
     const archive = await app.inject({ method: "POST", url: `/v1/agents/${agentId}/archive`, headers: auth });
     expect(archive.statusCode).toBe(200);
     expect(archive.json().agent.status).toBe("archived");
+  });
+
+  it("stores Agent Contract and injects it into model context", async () => {
+    const app = await createServer({ apiToken: "test-token" });
+    const create = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: auth,
+      payload: {
+        name: "NovelCoach",
+        instruction: "指导写小说",
+        contract: {
+          role: "中文小说写作教练",
+          mission: "帮助用户把模糊想法推进为可执行写作计划",
+          style: "简洁、结构化、可执行",
+          version: "2"
+        }
+      }
+    });
+    expect(create.statusCode).toBe(201);
+    expect(create.json().agent.contract).toMatchObject({
+      role: "中文小说写作教练",
+      mission: "帮助用户把模糊想法推进为可执行写作计划",
+      version: "2"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/v1/agents/${create.json().agent.id}/messages`,
+      headers: auth,
+      payload: { message: "我想写未来城市记忆订阅题材", compression: "hybrid" }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().message.content).toContain("Agent Contract v2");
+    expect(response.json().message.content).toContain("中文小说写作教练");
+  });
+
+  it("builds auditable layered context with contract, current message, memory ranking and redaction", () => {
+    const now = new Date().toISOString();
+    const agent: Agent = {
+      id: "agent_context",
+      name: "ContextAgent",
+      description: "",
+      instruction: "回答问题",
+      contract: defaultAgentContract({
+        name: "ContextAgent",
+        instruction: "回答问题",
+        contract: { role: "职责明确的助手", mission: "基于上下文回答", version: "3" }
+      }),
+      status: "active",
+      defaultModel: "mock",
+      providerId: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const memory = (id: string, summary: string, content: string, importance: number): AgentMemory => ({
+      id,
+      agentId: agent.id,
+      type: "semantic",
+      scope: "agent",
+      status: "active",
+      summary,
+      content,
+      source: "test",
+      sourceRunId: null,
+      importance,
+      confidence: 0.9,
+      tags: ["小说"],
+      provenance: `test:${id}`,
+      expiresAt: null,
+      lastAccessedAt: now,
+      createdBy: "test",
+      createdAt: now,
+      updatedAt: now
+    });
+    const history: AgentMessage[] = Array.from({ length: 14 }, (_, index) => ({
+      id: `msg_${index}`,
+      conversationId: "conv_1",
+      agentId: agent.id,
+      role: index % 2 === 0 ? "user" : "agent",
+      content: `历史 ${index}：讨论未来城市和记忆订阅`,
+      runId: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 1,
+      createdAt: now
+    }));
+
+    const built = buildAgentContext({
+      agent,
+      currentMessage: "继续写未来城市记忆订阅小说",
+      historyMessages: history,
+      memories: [
+        memory("irrelevant", "烹饪", "用户喜欢做饭", 0.2),
+        memory("relevant", "小说偏好", "用户正在写未来城市记忆订阅小说", 0.95)
+      ],
+      externalContext: [{ source: "system", content: "secret-token-should-not-leak", priority: 90, sensitive: true }],
+      budgetTokens: 1200
+    });
+    const serialized = JSON.stringify(built.blocks);
+    expect(built.blocks.some((block) => block.id === "user:current")).toBe(true);
+    expect(built.blocks.some((block) => block.kind === "developer" && block.content.includes("Agent Contract v3"))).toBe(true);
+    expect(built.blocks.find((block) => block.id === "memory:relevant")?.priority).toBeGreaterThan(built.blocks.find((block) => block.id === "memory:irrelevant")?.priority ?? 0);
+    expect(serialized).toContain("[已脱敏敏感上下文]");
+    expect(serialized).not.toContain("secret-token-should-not-leak");
+    expect(built.audit.kept.length).toBeGreaterThan(0);
+    expect(built.audit.reasons["user:current"]).toContain("当前用户消息");
   });
 
   it("exposes queue status", async () => {

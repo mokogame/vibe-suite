@@ -4,6 +4,8 @@ import type { ModelProvider } from "../model/providers.js";
 import { ProviderError, estimateTokens } from "../model/providers.js";
 import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID, type AuthActor, type ContextItem, type CreateRunInput, type ResourceScope, type RunStatus } from "../types.js";
 import { runTool } from "../tools/registry.js";
+import { buildAgentContext } from "./context-builder.js";
+import { compilePromptMessages } from "./prompt-compiler.js";
 
 const DEFAULT_MODEL_TIMEOUT_MS = 90_000;
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 6000;
@@ -78,14 +80,31 @@ export class Orchestrator {
         await this.transitionRun(runId, "building_context");
         await this.transitionStep(step.id, "building_context", "正在整理上下文", `${agent.name} 正在整理输入、共享上下文和上一步输出。`);
 
-        const stepContext = trimContext(
+        const rawStepContext = trimContext(
           finalOutput ? [...context, { source: "agent", content: `上一位 Agent 输出：${finalOutput}`, priority: 80 }] : context,
           this.options.contextTokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
         );
+        const scopedMemories = (await this.store.listMemories(agent.id))
+          .filter((memory) => sameScope(memory, actor))
+          .filter((memory) => memory.status === "active");
+        const builtContext = input.messages
+          ? { legacyContext: rawStepContext, audit: input.contextAudit ?? buildAgentContext({ agent, currentMessage: currentInput, historyMessages: [], memories: [], externalContext: rawStepContext, budgetTokens: this.options.contextTokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET }).audit, blocks: [] }
+          : buildAgentContext({
+            agent,
+            currentMessage: currentInput,
+            historyMessages: [],
+            memories: scopedMemories,
+            externalContext: rawStepContext,
+            strategy: "hybrid",
+            budgetTokens: this.options.contextTokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
+          });
+        const stepContext = builtContext.legacyContext;
+        const promptMessages = input.messages ?? compilePromptMessages(builtContext.blocks);
         await this.audit(requestId, actor.name, "run.context.injected", "step", step.id, "success", {
           contextCount: stepContext.length,
           sensitiveCount: stepContext.filter((item) => item.sensitive).length,
-          estimatedTokens: estimateTokens(stepContext.map((item) => item.content).join("\n"))
+          estimatedTokens: estimateTokens(stepContext.map((item) => item.content).join("\n")),
+          contextAudit: builtContext.audit
         });
 
         const runtimeProvider = await this.resolveProvider(input.providerId, agent.providerId, agent.defaultModel);
@@ -105,6 +124,8 @@ export class Orchestrator {
           agent,
           input: currentInput,
           context: stepContext,
+          messages: promptMessages,
+          contextAudit: builtContext.audit,
           timeoutMs: this.options.modelTimeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS
         });
 
@@ -134,7 +155,8 @@ export class Orchestrator {
           model: result.model,
           totalTokens: result.totalTokens,
           latencyMs,
-          contextSummary: stepContext.map((item) => `${item.source}:${item.content.slice(0, 80)}`).join(" | ")
+          contextSummary: stepContext.map((item) => `${item.source}:${item.content.slice(0, 80)}`).join(" | "),
+          contextAudit: builtContext.audit
         });
         await this.options.onUsage?.({ actor, agentId: agent.id, provider: result.provider, model: result.model, totalTokens: result.totalTokens, latencyMs });
         await this.audit(requestId, actor.name, "run.step.completed", "step", step.id, "success", {

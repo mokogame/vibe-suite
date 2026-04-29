@@ -30,6 +30,7 @@ export type Agent = {
   name: string;
   description: string;
   instruction: string;
+  contract: AgentContract;
   status: AgentStatus;
   defaultModel: string;
   providerId: string | null;
@@ -133,6 +134,67 @@ export type ContextItem = {
   sensitive?: boolean;
 };
 
+export type AgentContract = {
+  role: string;
+  mission: string;
+  boundaries: string[];
+  style: string;
+  outputContract: string;
+  toolPolicy: string;
+  memoryPolicy: string;
+  handoffPolicy: string;
+  safetyPolicy: string;
+  version: string;
+};
+
+export type PromptMessageRole = "system" | "developer" | "user" | "assistant" | "tool";
+
+export type PromptMessage = {
+  role: PromptMessageRole;
+  content: string;
+  name?: string;
+};
+
+export type ContextBlockKind =
+  | "system"
+  | "developer"
+  | "memory"
+  | "history"
+  | "summary"
+  | "tool"
+  | "attachment"
+  | "external"
+  | "user";
+
+export type ContextBlock = {
+  id: string;
+  kind: ContextBlockKind;
+  role: PromptMessageRole;
+  source: string;
+  content: string;
+  priority: number;
+  tokenCost: number;
+  recency: number;
+  relevance: number;
+  importance: number;
+  confidence: number;
+  sensitive: boolean;
+  provenance: string;
+  reason: string;
+  required?: boolean;
+};
+
+export type ContextBuildAudit = {
+  strategy: CompressionStrategy;
+  budgetTokens: number;
+  originalTokens: number;
+  compressedTokens: number;
+  kept: string[];
+  summarized: string[];
+  dropped: string[];
+  reasons: Record<string, string>;
+};
+
 export type ModelCallInput = {
   requestId: string;
   runId: string;
@@ -140,6 +202,8 @@ export type ModelCallInput = {
   agent: Agent;
   input: string;
   context: ContextItem[];
+  messages?: PromptMessage[];
+  contextAudit?: ContextBuildAudit;
   timeoutMs: number;
 };
 
@@ -169,6 +233,8 @@ export type CreateRunInput = {
   agentIds: string[];
   input: string;
   context?: Array<string | Partial<ContextItem> & { content: string }>;
+  messages?: PromptMessage[];
+  contextAudit?: ContextBuildAudit;
   toolCalls?: ToolCallInput[];
   callbackUrl?: string;
   callbackSecret?: string;
@@ -195,6 +261,12 @@ export type AgentMemory = {
   content: string;
   source: string;
   sourceRunId: string | null;
+  importance: number;
+  confidence: number;
+  tags: string[];
+  provenance: string;
+  expiresAt: string | null;
+  lastAccessedAt: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;

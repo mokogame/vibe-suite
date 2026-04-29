@@ -1,6 +1,6 @@
 # Vibe Claw 设计记录
 
-> 本文档与 `docs/vibe-claw.md`、`docs/需求文档.md` 保持一致，记录当前实现采用的主要工程取舍。更新时间：2026-04-29。
+> 本文档与 `docs/vibe-claw.md`、`docs/阶段性需求文档.md`、`docs/ACCEPTANCE.md` 保持一致，记录当前实现采用的主要工程取舍。更新时间：2026-04-30。
 
 ## 目标问题
 
@@ -21,6 +21,9 @@
 - `api/openapi.ts`：公开 OpenAPI 契约。
 - `api/admin-page.ts`：单页管理后台，所有操作通过公开 API 完成。
 - `core/orchestrator.ts`：Run/Step 状态推进、上下文整理、provider 调用、失败和取消处理。
+- `core/agent-contract.ts`：Agent 结构化职责契约的默认值、归一化和渲染。
+- `core/context-builder.ts`：统一构建 system/developer/memory/history/summary/tool/attachment/user 上下文块，并生成审计。
+- `core/prompt-compiler.ts`：把上下文块编译为模型 messages，避免所有内容混入单一 system prompt。
 - `core/run-queue.ts`：Run 队列抽象；内存模式用于开发，PostgreSQL 模式支持 claim/lease、重试、退避和 dead letter。
 - `core/webhooks.ts`：Run callback、Webhook subscription、投递日志、HMAC 签名、重试和 replay。
 - `store/store.ts`：存储接口。
@@ -54,16 +57,20 @@
 
 ## 上下文治理
 
-Run context 支持字符串或结构化对象：`source`、`content`、`priority`、`sensitive`。编排器按优先级和 token budget 裁剪上下文，敏感上下文不会无审计地原样传给模型 provider。
+Run context 支持字符串或结构化对象：`source`、`content`、`priority`、`sensitive`。编排器通过 Context Builder 按优先级、相关性、重要性、时间、可信度和 token budget 裁剪上下文，敏感上下文在进入模型前彻底替换为脱敏占位。
 
-普通对话上下文来源：
+普通对话上下文采用成熟分层策略：
 
-- Agent instruction。
-- conversation 历史消息。
-- 外部 context。
-- 附件文本或附件元数据。
-- Agent 记忆。
-- compression 策略结果。
+- `system`：平台安全边界和运行时规则，始终保留。
+- `developer`：Agent Contract，包括 role、mission、boundaries、style、outputContract、toolPolicy、memoryPolicy、handoffPolicy、safetyPolicy、version，始终保留。
+- `memory`：active 且同 scope 的长期记忆，按相关性、重要性、时间、可信度排序截断。
+- `history`：最近对话窗口优先保留。
+- `summary`：更早历史进入 rolling summary。
+- `tool`：显式工具结果按权限治理后注入。
+- `attachment`：附件文本或附件元数据。
+- `user`：当前用户消息，始终保留。
+
+每次上下文构建都会生成 `contextAudit`，包含 kept、summarized、dropped 和注入原因，并写入压缩审计/运行审计链路。Provider 调用使用语义化 messages；OpenAI-compatible provider 会把 `developer` 映射为 system 前缀、把 `tool` 结果映射为用户可读上下文，避免不兼容裸 tool message。
 
 协议运行上下文优先保留 protocol contract、input schema、output schema 和结构化输出约束。
 

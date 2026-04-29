@@ -73,7 +73,13 @@ curl -X POST http://localhost:3100/v1/agents \
     "name":"Planner",
     "instruction":"负责拆解任务",
     "defaultModel":"deepseek-chat",
-    "providerId":"provider_xxx"
+    "providerId":"provider_xxx",
+    "contract":{
+      "role":"任务规划 Agent",
+      "mission":"把用户目标拆成可执行任务",
+      "style":"简洁、结构化",
+      "version":"1"
+    }
   }'
 ```
 

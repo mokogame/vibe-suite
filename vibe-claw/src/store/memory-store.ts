@@ -1,4 +1,5 @@
 import { newId, nowIso } from "../core/ids.js";
+import { defaultAgentContract } from "../core/agent-contract.js";
 import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
 import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
 import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, CreateUsageCounterData, CreateWebhookSubscriptionData, Store, UpdateAgentData, UpdateProviderData, UpdateWebhookSubscriptionData } from "./store.js";
@@ -66,6 +67,7 @@ export class MemoryStore implements Store {
       name: data.name,
       description: data.description ?? "",
       instruction: data.instruction,
+      contract: defaultAgentContract(data),
       status: "active",
       defaultModel: data.defaultModel ?? "mock",
       providerId: data.providerId ?? null,
@@ -79,7 +81,13 @@ export class MemoryStore implements Store {
   async updateAgent(id: string, patch: UpdateAgentData): Promise<Agent | null> {
     const current = this.agents.get(id);
     if (!current) return null;
-    const next = { ...current, ...withoutUndefined(patch), updatedAt: nowIso() };
+    const patchWithoutContract = withoutUndefined(patch);
+    const next = {
+      ...current,
+      ...patchWithoutContract,
+      contract: patch.contract ? defaultAgentContract({ ...current, ...patchWithoutContract, contract: { ...current.contract, ...patch.contract } }) : current.contract,
+      updatedAt: nowIso()
+    };
     this.agents.set(id, next);
     return next;
   }
@@ -131,7 +139,21 @@ export class MemoryStore implements Store {
 
   async createMemory(data: CreateMemoryData): Promise<AgentMemory> {
     const now = nowIso();
-    const memory: AgentMemory = { id: newId("mem"), ...scopeFrom(data), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
+    const memory: AgentMemory = {
+      id: newId("mem"),
+      ...scopeFrom(data),
+      status: "active",
+      sourceRunId: data.sourceRunId ?? null,
+      importance: data.importance ?? defaultMemoryImportance(data.type),
+      confidence: data.confidence ?? 0.75,
+      tags: data.tags ?? [],
+      provenance: data.provenance ?? data.source,
+      expiresAt: data.expiresAt ?? null,
+      lastAccessedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      ...data
+    };
     this.memories.set(memory.id, memory);
     return memory;
   }
@@ -501,4 +523,11 @@ function idempotencyMapKey(scope: ResourceScope, actor: string, method: string, 
 
 function usageMapKey(scope: ResourceScope, tokenId: string | null, agentId: string | null, providerId: string | null, window: string): string {
   return [scope.tenantId, scope.projectId, tokenId ?? "", agentId ?? "", providerId ?? "", window].join(":");
+}
+
+function defaultMemoryImportance(type: AgentMemory["type"]): number {
+  if (type === "profile") return 0.95;
+  if (type === "semantic") return 0.8;
+  if (type === "episodic") return 0.65;
+  return 0.55;
 }

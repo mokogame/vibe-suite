@@ -1,5 +1,6 @@
 import pg from "pg";
 import { newId, nowIso } from "../core/ids.js";
+import { defaultAgentContract } from "../core/agent-contract.js";
 import { DEFAULT_PROJECT_ID, DEFAULT_TENANT_ID } from "../types.js";
 import type { Agent, AgentConversation, AgentLease, AgentMemory, AgentMessage, AgentProtocol, AgentRun, ApiToken, AuditEvent, CompressionAudit, IdempotencyRecord, ModelProviderConfig, ResourceScope, RunArtifact, RunEvent, RunQueueTask, RunStep, UsageCounter, WebhookDelivery, WebhookSubscription } from "../types.js";
 import type { CreateAgentData, CreateArtifactData, CreateCompressionAuditData, CreateConversationData, CreateLeaseData, CreateMemoryData, CreateMessageData, CreateProtocolData, CreateProviderData, CreateRunQueueTaskData, CreateUsageCounterData, CreateWebhookSubscriptionData, Store, UpdateAgentData, UpdateProviderData, UpdateWebhookSubscriptionData } from "./store.js";
@@ -75,6 +76,7 @@ export class PostgresStore implements Store {
       name: data.name,
       description: data.description ?? "",
       instruction: data.instruction,
+      contract: defaultAgentContract(data),
       status: "active",
       defaultModel: data.defaultModel ?? "mock",
       providerId: data.providerId ?? null,
@@ -82,9 +84,9 @@ export class PostgresStore implements Store {
       updatedAt: now
     };
     await this.pool.query(
-      `insert into agents (id, tenant_id, project_id, name, description, instruction, status, default_model, provider_id, created_at, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [agent.id, agent.tenantId, agent.projectId, agent.name, agent.description, agent.instruction, agent.status, agent.defaultModel, agent.providerId, agent.createdAt, agent.updatedAt]
+      `insert into agents (id, tenant_id, project_id, name, description, instruction, contract, status, default_model, provider_id, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [agent.id, agent.tenantId, agent.projectId, agent.name, agent.description, agent.instruction, JSON.stringify(agent.contract), agent.status, agent.defaultModel, agent.providerId, agent.createdAt, agent.updatedAt]
     );
     return agent;
   }
@@ -92,10 +94,16 @@ export class PostgresStore implements Store {
   async updateAgent(id: string, patch: UpdateAgentData): Promise<Agent | null> {
     const current = await this.getAgent(id);
     if (!current) return null;
-    const next = { ...current, ...withoutUndefined(patch), updatedAt: nowIso() };
+    const patchWithoutContract = withoutUndefined(patch);
+    const next = {
+      ...current,
+      ...patchWithoutContract,
+      contract: patch.contract ? defaultAgentContract({ ...current, ...patchWithoutContract, contract: { ...current.contract, ...patch.contract } }) : current.contract,
+      updatedAt: nowIso()
+    };
     await this.pool.query(
-      `update agents set name=$2, description=$3, instruction=$4, status=$5, default_model=$6, provider_id=$7, updated_at=$8 where id=$1`,
-      [id, next.name, next.description, next.instruction, next.status, next.defaultModel, next.providerId, next.updatedAt]
+      `update agents set name=$2, description=$3, instruction=$4, contract=$5, status=$6, default_model=$7, provider_id=$8, updated_at=$9 where id=$1`,
+      [id, next.name, next.description, next.instruction, JSON.stringify(next.contract), next.status, next.defaultModel, next.providerId, next.updatedAt]
     );
     return next;
   }
@@ -158,11 +166,25 @@ export class PostgresStore implements Store {
 
   async createMemory(data: CreateMemoryData): Promise<AgentMemory> {
     const now = nowIso();
-    const memory: AgentMemory = { id: newId("mem"), ...scopeFrom(data), status: "active", sourceRunId: data.sourceRunId ?? null, createdAt: now, updatedAt: now, ...data };
+    const memory: AgentMemory = {
+      id: newId("mem"),
+      ...scopeFrom(data),
+      status: "active",
+      sourceRunId: data.sourceRunId ?? null,
+      importance: data.importance ?? defaultMemoryImportance(data.type),
+      confidence: data.confidence ?? 0.75,
+      tags: data.tags ?? [],
+      provenance: data.provenance ?? data.source,
+      expiresAt: data.expiresAt ?? null,
+      lastAccessedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      ...data
+    };
     await this.pool.query(
-      `insert into agent_memories (id, tenant_id, project_id, agent_id, type, scope, status, summary, content, source, source_run_id, created_by, created_at, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-      [memory.id, memory.tenantId, memory.projectId, memory.agentId, memory.type, memory.scope, memory.status, memory.summary, memory.content, memory.source, memory.sourceRunId, memory.createdBy, memory.createdAt, memory.updatedAt]
+      `insert into agent_memories (id, tenant_id, project_id, agent_id, type, scope, status, summary, content, source, source_run_id, importance, confidence, tags, provenance, expires_at, last_accessed_at, created_by, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+      [memory.id, memory.tenantId, memory.projectId, memory.agentId, memory.type, memory.scope, memory.status, memory.summary, memory.content, memory.source, memory.sourceRunId, memory.importance, memory.confidence, memory.tags.join(","), memory.provenance, memory.expiresAt, memory.lastAccessedAt, memory.createdBy, memory.createdAt, memory.updatedAt]
     );
     return memory;
   }
@@ -674,7 +696,27 @@ function rowToWebhookSubscription(row: Record<string, unknown>): WebhookSubscrip
 }
 
 function rowToMemory(row: Record<string, unknown>): AgentMemory {
-  return { id: String(row.id), ...rowScope(row), agentId: String(row.agent_id), type: row.type as AgentMemory["type"], scope: row.scope as AgentMemory["scope"], status: row.status as AgentMemory["status"], summary: String(row.summary), content: String(row.content), source: String(row.source), sourceRunId: row.source_run_id === null ? null : String(row.source_run_id), createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
+  return {
+    id: String(row.id),
+    ...rowScope(row),
+    agentId: String(row.agent_id),
+    type: row.type as AgentMemory["type"],
+    scope: row.scope as AgentMemory["scope"],
+    status: row.status as AgentMemory["status"],
+    summary: String(row.summary),
+    content: String(row.content),
+    source: String(row.source),
+    sourceRunId: row.source_run_id === null ? null : String(row.source_run_id),
+    importance: Number(row.importance ?? defaultMemoryImportance(row.type as AgentMemory["type"])),
+    confidence: Number(row.confidence ?? 0.75),
+    tags: String(row.tags ?? "").split(",").map((item) => item.trim()).filter(Boolean),
+    provenance: String(row.provenance ?? row.source ?? "unknown"),
+    expiresAt: row.expires_at === null || row.expires_at === undefined ? null : iso(row.expires_at),
+    lastAccessedAt: row.last_accessed_at === null || row.last_accessed_at === undefined ? null : iso(row.last_accessed_at),
+    createdBy: String(row.created_by),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
 }
 
 function rowToConversation(row: Record<string, unknown>): AgentConversation {
@@ -719,18 +761,41 @@ function rowToProvider(row: Record<string, unknown>): ModelProviderConfig {
 }
 
 function rowToAgent(row: Record<string, unknown>): Agent {
+  const partialContract = parseJsonObject(row.contract);
+  const instruction = String(row.instruction);
+  const name = String(row.name);
+  const description = String(row.description ?? "");
   return {
     id: String(row.id),
     ...rowScope(row),
-    name: String(row.name),
-    description: String(row.description ?? ""),
-    instruction: String(row.instruction),
+    name,
+    description,
+    instruction,
+    contract: defaultAgentContract({ name, description, instruction, contract: partialContract }),
     status: row.status as Agent["status"],
     defaultModel: String(row.default_model),
     providerId: row.provider_id === null || row.provider_id === undefined ? null : String(row.provider_id),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultMemoryImportance(type: AgentMemory["type"]): number {
+  if (type === "profile") return 0.95;
+  if (type === "semantic") return 0.8;
+  if (type === "episodic") return 0.65;
+  return 0.55;
 }
 
 function rowToRun(row: Record<string, unknown>): AgentRun {

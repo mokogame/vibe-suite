@@ -42,7 +42,44 @@ function fileToDataUrl(file) {
 
 function formatTime(value) {
   if (!value) return "";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  if (diffMs >= 0 && diffMs < 60_000) return "刚刚";
+  if (diffMs >= 0 && diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}分钟前`;
+  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const dayDiff = Math.round((startOfToday - startOfDate) / 86_400_000);
+  if (dayDiff === 0) return `今天 ${time}`;
+  if (dayDiff === 1) return `昨天 ${time}`;
+  if (dayDiff > 1 && dayDiff < 7) {
+    return `${date.toLocaleDateString("zh-CN", { weekday: "short" })} ${time}`;
+  }
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${time}`;
+}
+
+function stripInternalContextLeak(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  let index = 0;
+  let stripped = false;
+  const internalMeta = /^\[(system|developer|memory|history|summary|external|attachment|tool|user);[^\]]+\]\s*$/i;
+  const internalContent = /^(历史消息|长期记忆|滚动摘要|上下文摘要|内部历史消息|内部长期记忆|内部滚动摘要|调用方提供的内部上下文)[（(]/;
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+    if (internalMeta.test(line) || /^reason\s*[:：]/i.test(line) || internalContent.test(line)) {
+      stripped = true;
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return stripped ? lines.slice(index).join("\n").trimStart() : String(text || "");
 }
 
 function normalizeUsernameInput(value) {
@@ -57,6 +94,93 @@ function isNearBottom(element, threshold = 120) {
 function isLongAgentText(text) {
   const value = String(text || "");
   return value.length > 900 || value.split(/\r?\n/).length > 10;
+}
+
+function agentRole(agent) {
+  return agent?.contract?.role || agent?.role || agent?.name || "智能体";
+}
+
+function agentMission(agent) {
+  return agent?.contract?.mission || agent?.mission || agent?.description || "可以直接发送问题开始对话。";
+}
+
+function agentStyle(agent) {
+  return agent?.contract?.style || agent?.style || "";
+}
+
+function agentBoundaries(agent) {
+  const boundaries = agent?.contract?.boundaries || agent?.boundaries || [];
+  return Array.isArray(boundaries) ? boundaries.filter(Boolean) : [];
+}
+
+function agentCapabilitySummary(agent) {
+  const role = agentRole(agent);
+  const mission = agentMission(agent);
+  const style = agentStyle(agent);
+  const output = agent?.contract?.outputContract || agent?.outputContract || "";
+  return [
+    `${role} 会围绕“${mission}”提供连续协作。`,
+    style ? `回复风格：${style}。` : "",
+    output ? `输出约定：${output}。` : ""
+  ].filter(Boolean).join(" ");
+}
+
+function agentSearchText(agent) {
+  return [
+    agent?.name,
+    agentRole(agent),
+    agentMission(agent),
+    agentStyle(agent),
+    agent?.defaultModel,
+    agent?.providerId
+  ].filter(Boolean).join(" ");
+}
+
+function composerMentionTrigger(text, caret) {
+  const before = String(text || "").slice(0, Math.max(0, Number(caret || 0)));
+  const match = before.match(/(^|\s)@([a-zA-Z0-9_]*)$/);
+  if (!match) return null;
+  return {
+    start: before.length - match[2].length - 1,
+    end: before.length,
+    query: match[2].toLowerCase()
+  };
+}
+
+function normalizeThinkingAgents(value, active, activeSummary, currentAgent) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (!value) return [];
+  if (currentAgent) return [{ id: currentAgent.agentId || currentAgent.userId, name: currentAgent.name }];
+  return [{ id: active?.id || activeSummary?.id || "agent", name: activeSummary?.title || active?.title || "Agent" }];
+}
+
+function thinkingAgentsForMessage(active, activeSummary, currentAgent, mentions = [], members = [], text = "") {
+  if (active?.type !== "group") {
+    const agent = currentAgent || active?.agent || activeSummary?.agent;
+    return [{ id: agent?.agentId || agent?.userId || active?.id, name: agent?.name || activeSummary?.title || active?.title || "Agent" }];
+  }
+  const structured = mentions
+    .filter(mention => mention.type === "agent" || mention.role === "agent")
+    .map(mention => ({ id: mention.agentId || mention.userId, name: mention.displayName || mention.username || "Agent" }));
+  if (structured.length) return structured;
+  const mentioned = new Set(String(text || "").match(/@([a-zA-Z0-9_]+)/g)?.map(value => value.slice(1).toLowerCase()) || []);
+  return members
+    .filter(member => member.role === "agent" && mentioned.has(String(member.username || "").toLowerCase()))
+    .map(member => ({ id: member.id, name: member.displayName || member.username || "Agent" }));
+}
+
+function clearThinkingForMessage(current, message) {
+  if (!message?.conversationId) return current;
+  if (message.type === "system") return { ...current, [message.conversationId]: [] };
+  if (message.sender?.role !== "agent") return current;
+  const value = current[message.conversationId];
+  if (!Array.isArray(value)) return { ...current, [message.conversationId]: [] };
+  const next = value.filter(agent =>
+    agent.id !== message.sender.id &&
+    agent.username !== message.sender.username &&
+    agent.name !== message.sender.displayName
+  );
+  return { ...current, [message.conversationId]: next };
 }
 
 function safeLinkHref(value) {
@@ -236,6 +360,20 @@ function renderRichText(text, options = {}) {
 
 function MessageText({ text, onCopyCode }) {
   return <div className="messageText">{renderRichText(text, { onCopyCode })}</div>;
+}
+
+function MessageMentions({ mentions = [] }) {
+  const items = Array.isArray(mentions) ? mentions : [];
+  if (!items.length) return null;
+  return (
+    <div className="messageMentions">
+      {items.map(mention => (
+        <span className={mention.type === "agent" || mention.role === "agent" ? "agent" : ""} key={`${mention.userId || mention.id}-${mention.username}`}>
+          @{mention.displayName || mention.username}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function Modal({ title, children, onClose, className = "" }) {
@@ -467,6 +605,9 @@ export default function Home() {
   const [createMembers, setCreateMembers] = useState([]);
   const [inviteName, setInviteName] = useState("");
   const [draft, setDraft] = useState("");
+  const [draftMentions, setDraftMentions] = useState([]);
+  const [composerCaret, setComposerCaret] = useState(0);
+  const [composerMentionIndex, setComposerMentionIndex] = useState(0);
   const [modal, setModal] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
   const [expandedMessages, setExpandedMessages] = useState({});
@@ -480,12 +621,14 @@ export default function Home() {
   const composerInputRef = useRef(null);
   const shouldStickToBottomRef = useRef(true);
   const forceScrollNextRef = useRef(false);
+  const autoScrollUntilRef = useRef(0);
   const sendLockRef = useRef(new Set());
   const { showError, showNotice } = useSystemNotice();
 
   const transportKey = auth?.transportKey || "";
   const latestMessageId = messages[messages.length - 1]?.id || "";
-  const activeAgentThinking = Boolean(active && agentThinkingByConversation[active.id]);
+  const activeThinkingValue = active ? agentThinkingByConversation[active.id] : null;
+  const activeAgentThinking = Array.isArray(activeThinkingValue) ? activeThinkingValue.length > 0 : Boolean(activeThinkingValue);
   const activeSending = Boolean(active && sendingByConversation[active.id]);
 
   useEffect(() => {
@@ -501,9 +644,13 @@ export default function Home() {
     wsRef.current = ws;
     ws.onmessage = event => {
       const data = JSON.parse(event.data);
-      if (data.type === "message") {
-        if (data.message.type === "system" || data.message.sender?.id !== auth.user.id) {
-          setAgentThinkingByConversation(current => ({ ...current, [data.message.conversationId]: false }));
+        if (data.type === "message") {
+        if (data.message.sender?.role === "agent") {
+          forceScrollNextRef.current = true;
+          autoScrollUntilRef.current = Date.now() + 5000;
+        }
+          if (data.message.type === "system" || data.message.sender?.id !== auth.user.id) {
+          setAgentThinkingByConversation(current => clearThinkingForMessage(current, data.message));
           setAgentTimeoutByConversation(current => ({ ...current, [data.message.conversationId]: false }));
         }
         setMessages(current => {
@@ -546,6 +693,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!active) return;
+    setDraftMentions([]);
     const frame = requestAnimationFrame(() => {
       composerInputRef.current?.focus({ preventScroll: true });
     });
@@ -586,18 +734,56 @@ export default function Home() {
       forceScrollNextRef.current ||
       shouldStickToBottomRef.current ||
       latest?.sender?.id === auth?.user?.id ||
-      activeAgentThinking;
+      latest?.sender?.role === "agent" ||
+      activeAgentThinking ||
+      Date.now() < autoScrollUntilRef.current;
 
     if (!shouldScroll) return;
-    requestAnimationFrame(() => {
-      element.scrollTop = element.scrollHeight;
-      shouldStickToBottomRef.current = true;
-      forceScrollNextRef.current = false;
+    scrollMessageListToBottom();
+  }, [latestMessageId, active?.id, auth?.user?.id, activeAgentThinking, plainTextById, expandedMessages]);
+
+  useEffect(() => {
+    const element = messageListRef.current;
+    if (!element) return;
+    const keepBottom = () => {
+      if (shouldStickToBottomRef.current || forceScrollNextRef.current || Date.now() < autoScrollUntilRef.current) {
+        scrollMessageListToBottom();
+      }
+    };
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(keepBottom);
+    const observeChildren = () => {
+      if (!resizeObserver) return;
+      Array.from(element.children).forEach(child => resizeObserver.observe(child));
+    };
+    observeChildren();
+    const mutationObserver = new MutationObserver(() => {
+      observeChildren();
+      keepBottom();
     });
-  }, [latestMessageId, active?.id, auth?.user?.id, activeAgentThinking]);
+    mutationObserver.observe(element, { childList: true, subtree: true, characterData: true });
+    return () => {
+      resizeObserver?.disconnect();
+      mutationObserver.disconnect();
+    };
+  }, [active?.id]);
 
   function handleMessageListScroll(event) {
     shouldStickToBottomRef.current = isNearBottom(event.currentTarget);
+  }
+
+  function scrollMessageListToBottom() {
+    const element = messageListRef.current;
+    if (!element) return;
+    const apply = () => {
+      element.scrollTop = element.scrollHeight;
+      bottomRef.current?.scrollIntoView({ block: "end" });
+      shouldStickToBottomRef.current = true;
+      forceScrollNextRef.current = false;
+    };
+    requestAnimationFrame(() => {
+      apply();
+      requestAnimationFrame(apply);
+    });
   }
 
   async function copyMessageText(text) {
@@ -863,27 +1049,35 @@ export default function Home() {
     if (!active || !text.trim()) return;
     if (sendLockRef.current.has(active.id) || sendingByConversation[active.id]) return;
     const isAgentConversation = activeSummary?.isAgent || active.isAgent;
+    const mentions = active.type === "group" ? effectiveDraftMentions(text) : [];
+    const mentionsGroupAgent = active.type === "group" && mentionsAgentMember(text, mentions);
     sendLockRef.current.add(active.id);
     setSendingByConversation(current => ({ ...current, [active.id]: true }));
     try {
       const encryptedText = await encryptText(text.trim(), transportKey);
-      if (isAgentConversation) {
-        setAgentThinkingByConversation(current => ({ ...current, [active.id]: true }));
+      if (isAgentConversation || mentionsGroupAgent) {
+        autoScrollUntilRef.current = Date.now() + 8000;
+        setAgentThinkingByConversation(current => ({
+          ...current,
+          [active.id]: thinkingAgentsForMessage(active, activeSummary, currentAgent, mentions, members, text)
+        }));
         setAgentTimeoutByConversation(current => ({ ...current, [active.id]: false }));
       }
       if (retryLocalId) setFailedMessages(current => current.filter(item => item.localId !== retryLocalId));
       forceScrollNextRef.current = true;
+      autoScrollUntilRef.current = Date.now() + 8000;
       await api(`/api/conversations/${encodeURIComponent(active.id)}/messages`, {
         method: "POST",
-        body: { type: "text", encryptedText }
+        body: { type: "text", encryptedText, mentions }
       });
       setDraft("");
+      setDraftMentions([]);
       requestAnimationFrame(() => {
         composerInputRef.current?.focus({ preventScroll: true });
       });
     } catch (err) {
-      if (isAgentConversation) {
-        setAgentThinkingByConversation(current => ({ ...current, [active.id]: false }));
+      if (isAgentConversation || mentionsGroupAgent) {
+        setAgentThinkingByConversation(current => ({ ...current, [active.id]: [] }));
       }
       const failed = {
         localId: retryLocalId || `failed_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -905,6 +1099,46 @@ export default function Home() {
   async function sendMessage(event) {
     event.preventDefault();
     await sendTextMessage(draft);
+  }
+
+  function effectiveDraftMentions(text = draft) {
+    const value = String(text || "").toLowerCase();
+    const byUserId = new Map();
+    for (const mention of draftMentions) {
+      if (!value.includes(`@${String(mention.username || "").toLowerCase()}`)) continue;
+      byUserId.set(mention.userId, mention);
+    }
+    return Array.from(byUserId.values());
+  }
+
+  function mentionsAgentMember(text, mentions = effectiveDraftMentions(text)) {
+    if (mentions.some(mention => mention.type === "agent" || mention.role === "agent")) return true;
+    const mentioned = new Set(String(text || "").match(/@([a-zA-Z0-9_]+)/g)?.map(value => value.slice(1).toLowerCase()) || []);
+    if (!mentioned.size) return false;
+    return members.some(member => member.role === "agent" && mentioned.has(String(member.username || "").toLowerCase()));
+  }
+
+  function pickComposerMention(member) {
+    const trigger = composerMentionTrigger(draft, composerCaret);
+    if (!trigger) return;
+    const nextText = `${draft.slice(0, trigger.start)}@${member.username} ${draft.slice(trigger.end)}`;
+    const nextCaret = trigger.start + member.username.length + 2;
+    setDraft(nextText);
+    setComposerCaret(nextCaret);
+    setDraftMentions(current => {
+      if (current.some(item => item.userId === member.id)) return current;
+      return [...current, {
+        userId: member.id,
+        username: member.username,
+        displayName: member.displayName,
+        role: member.role,
+        type: member.role === "agent" ? "agent" : "user"
+      }];
+    });
+    requestAnimationFrame(() => {
+      composerInputRef.current?.focus({ preventScroll: true });
+      composerInputRef.current?.setSelectionRange(nextCaret, nextCaret);
+    });
   }
 
   async function uploadAndSend(event) {
@@ -945,11 +1179,44 @@ export default function Home() {
     const userId = activeSummary?.otherUser?.id || active?.otherUser?.id;
     return clawAgents.find(agent => agent.userId === userId) || active?.agent || activeSummary?.agent || null;
   }, [activeSummary, active, clawAgents]);
+  const activeThinkingAgents = useMemo(
+    () => active ? normalizeThinkingAgents(agentThinkingByConversation[active.id], active, activeSummary, currentAgent) : [],
+    [active, activeSummary, currentAgent, agentThinkingByConversation]
+  );
+  const currentAgentRecentStats = useMemo(() => {
+    if (!currentAgent) return null;
+    const agentMessages = messages.filter(message => message.sender?.id === currentAgent.userId);
+    const latest = agentMessages[agentMessages.length - 1] || null;
+    return {
+      replyCount: agentMessages.length,
+      lastReplyAt: latest?.createdAt || null,
+      lastReplyPreview: latest ? stripInternalContextLeak(plainTextById[latest.id] || latest.systemText || "").slice(0, 160) : ""
+    };
+  }, [currentAgent, messages, plainTextById]);
+  const activeMentionTrigger = useMemo(() => active?.type === "group" ? composerMentionTrigger(draft, composerCaret) : null, [active?.type, draft, composerCaret]);
+  const composerMentionCandidates = useMemo(() => {
+    if (!activeMentionTrigger) return [];
+    const query = activeMentionTrigger.query;
+    return members
+      .filter(member => {
+        if (member.id === auth?.user?.id) return false;
+        const haystack = `${member.displayName || ""} ${member.username || ""}`.toLowerCase();
+        return !query || haystack.includes(query);
+      })
+      .sort((a, b) => {
+        if (a.role === b.role) return String(a.displayName || a.username).localeCompare(String(b.displayName || b.username), "zh-CN");
+        return a.role === "agent" ? -1 : 1;
+      })
+      .slice(0, 8);
+  }, [activeMentionTrigger, members, auth?.user?.id]);
+  useEffect(() => {
+    setComposerMentionIndex(0);
+  }, [activeMentionTrigger?.query, composerMentionCandidates.length]);
   const filteredAgents = useMemo(() => {
     const query = agentSearch.trim().toLowerCase();
     return clawAgents.filter(agent => {
       const status = agentStatusFor(agent);
-      const matchesQuery = !query || `${agent.name} ${agent.description} ${agent.defaultModel}`.toLowerCase().includes(query);
+      const matchesQuery = !query || agentSearchText(agent).toLowerCase().includes(query);
       const matchesFilter =
         agentFilter === "all" ||
         (agentFilter === "recent" && recentAgentUserIds.has(agent.userId)) ||
@@ -1120,7 +1387,8 @@ export default function Home() {
                       <span className="conversationIcon agentIcon"><Bot size={18} /></span>
                       <span className="conversationMeta">
                         <strong>{agent.name}<em className={`agentStatusDot ${status}`}>{agentStatusText(status)}</em></strong>
-                        <small>{agent.defaultModel || "未配置模型"} · {continued ? "继续对话" : "开始对话"}</small>
+                        <small>{agentRole(agent)} · {continued ? "继续对话" : "开始对话"}</small>
+                        <small className="agentMissionLine">{agentMission(agent)}</small>
                       </span>
                     </button>
                   );
@@ -1168,11 +1436,11 @@ export default function Home() {
                   <h2>{activeSummary?.title || active.title || "会话"}</h2>
                   <span>
                     {activeSummary?.isAgent || active.isAgent
-                      ? `Vibe Claw 智能体 · ${agentStatusText(currentAgent ? agentStatusFor(currentAgent) : clawHealth?.status || "online")}`
+                      ? `${agentRole(currentAgent)} · ${agentStatusText(currentAgent ? agentStatusFor(currentAgent) : clawHealth?.status || "online")}`
                       : active.type === "group" ? `${members.length} 位成员` : "2 位成员"}
                   </span>
                 </div>
-                <button className="secondaryButton compactButton" type="button" onClick={() => setModal("chatInfo")}><UserPlus size={15} />成员</button>
+                <button className="secondaryButton compactButton" type="button" onClick={() => setModal("chatInfo")}><UserPlus size={15} />{activeSummary?.isAgent || active.isAgent ? "详情" : "成员"}</button>
               </div>
             </header>
 
@@ -1180,7 +1448,14 @@ export default function Home() {
               {(activeSummary?.isAgent || active.isAgent) && !messages.length && (
                 <article className="agentWelcome">
                   <strong>{currentAgent?.name || activeSummary?.title || active.title}</strong>
-                  <p>{currentAgent?.description || "这是一个来自 Vibe Claw 的智能体。你可以直接发送问题开始对话。"}</p>
+                  <p>{agentMission(currentAgent)}</p>
+                  {currentAgent && (
+                    <div className="agentContractCard">
+                      <span><b>角色</b>{agentRole(currentAgent)}</span>
+                      {agentStyle(currentAgent) && <span><b>风格</b>{agentStyle(currentAgent)}</span>}
+                      {currentAgent.defaultModel && <span><b>模型</b>{currentAgent.defaultModel}</span>}
+                    </div>
+                  )}
                   <div>
                     {["请介绍你的能力", "帮我拆解下一步任务", "给我一个简短行动清单"].map(text => (
                       <button type="button" key={text} onClick={() => setDraft(text)}>{text}</button>
@@ -1205,11 +1480,17 @@ export default function Home() {
                       <time>{formatTime(message.createdAt)}</time>
                     </div>
                     {message.type === "text" && (() => {
-                      const text = plainTextById[message.id] || "";
+                      const rawText = plainTextById[message.id] || "";
+                      const text = message.sender.role === "agent" ? stripInternalContextLeak(rawText) : rawText;
                       const isAgentMessage = message.sender.role === "agent";
                       const long = isAgentMessage && isLongAgentText(text);
                       const expanded = Boolean(expandedMessages[message.id]);
-                      if (!long) return <MessageText text={text} onCopyCode={copyMessageText} />;
+                      if (!long) return (
+                        <>
+                          <MessageText text={text} onCopyCode={copyMessageText} />
+                          <MessageMentions mentions={message.mentions} />
+                        </>
+                      );
                       return (
                         <div className={`longMessageBubble ${expanded ? "expanded" : ""}`}>
                           <div className="longMessageContent">
@@ -1224,6 +1505,7 @@ export default function Home() {
                             <button type="button" onClick={() => copyMessageText(text)}>复制</button>
                             <button type="button" onClick={() => exportMarkdown(text, `${message.sender.displayName || "agent"}-${message.id}.md`)}>导出 Markdown</button>
                           </div>
+                          <MessageMentions mentions={message.mentions} />
                         </div>
                       );
                     })()}
@@ -1235,16 +1517,16 @@ export default function Home() {
                   </article>
                 );
               })}
-              {activeAgentThinking && (
-                <article className="message agentThinking">
+              {activeThinkingAgents.map(agent => (
+                <article className="message agentThinking" key={agent.id || agent.name}>
                   <div className="bubbleHead">
                     <span className="messageAvatar"><Bot size={16} /></span>
-                    <strong>{activeSummary?.title || active.title || "Agent"}</strong>
+                    <strong>{agent.name || "Agent"}</strong>
                     <time>正在思考</time>
                   </div>
                   <p><span className="typingDots"><i></i><i></i><i></i></span></p>
                 </article>
-              )}
+              ))}
               {active && agentTimeoutByConversation[active.id] && (
                 <article className="chatSystemMessage warning">
                   <span>Agent 回复时间较长，仍在等待 Vibe Claw 返回。你可以稍后查看，或检查后台连接诊断。</span>
@@ -1277,7 +1559,66 @@ export default function Home() {
                 <FileUp size={18} />
                 <input type="file" onChange={uploadAndSend} />
               </label>
-              <input ref={composerInputRef} value={draft} onChange={event => setDraft(event.target.value)} placeholder="输入消息，使用 @username 提及成员" />
+              <div className="composerInputWrap">
+                {!!effectiveDraftMentions().length && (
+                  <div className="composerMentionBar">
+                    {effectiveDraftMentions().map(mention => (
+                      <span className={mention.type === "agent" ? "agent" : ""} key={mention.userId}>
+                        @{mention.displayName || mention.username}
+                        <button type="button" onClick={() => setDraftMentions(current => current.filter(item => item.userId !== mention.userId))}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input
+                  ref={composerInputRef}
+                  value={draft}
+                  onChange={event => {
+                    setDraft(event.target.value);
+                    setComposerCaret(event.target.selectionStart || 0);
+                  }}
+                  onClick={event => setComposerCaret(event.currentTarget.selectionStart || 0)}
+                  onKeyUp={event => setComposerCaret(event.currentTarget.selectionStart || 0)}
+                  onKeyDown={event => {
+                    if (!composerMentionCandidates.length) return;
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setComposerMentionIndex(index => (index + 1) % composerMentionCandidates.length);
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setComposerMentionIndex(index => (index - 1 + composerMentionCandidates.length) % composerMentionCandidates.length);
+                    }
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      pickComposerMention(composerMentionCandidates[composerMentionIndex] || composerMentionCandidates[0]);
+                    }
+                    if (event.key === "Escape") {
+                      setComposerCaret(0);
+                    }
+                  }}
+                  placeholder={active?.type === "group" ? "输入消息，@成员或Agent" : "输入消息"}
+                />
+                {!!composerMentionCandidates.length && (
+                  <div className="composerMentionMenu">
+                    {composerMentionCandidates.map((member, index) => (
+                      <button
+                        className={index === composerMentionIndex ? "active" : ""}
+                        type="button"
+                        key={member.id}
+                        onMouseDown={event => {
+                          event.preventDefault();
+                          pickComposerMention(member);
+                        }}
+                      >
+                        <span className={`suggestAvatar ${member.role === "agent" ? "agent" : "user"}`}>{member.role === "agent" ? <Bot size={15} /> : <UserRound size={15} />}</span>
+                        <strong>{member.displayName}<em>{member.role === "agent" ? "Agent" : "真人"}</em></strong>
+                        <small>@{member.username}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button className="primaryButton" type="submit" disabled={activeSending || !draft.trim()}>
                 <Send size={18} />{activeSending ? "发送中..." : "发送"}
               </button>
@@ -1322,15 +1663,62 @@ export default function Home() {
         </Modal>
       )}
       {modal === "chatInfo" && active && (
-        <Modal title={active.type === "group" ? "群聊信息" : "聊天信息"} onClose={() => setModal("")}>
+        <Modal title={activeSummary?.isAgent || active.isAgent ? "智能体信息" : active.type === "group" ? "群聊信息" : "聊天信息"} onClose={() => setModal("")}>
           <div className="chatInfoPanel">
             <section className="chatInfoSummary">
-              <span className="conversationIcon large">{active.type === "group" ? <Users size={22} /> : <MessageCircle size={22} />}</span>
+              <span className={`conversationIcon large ${activeSummary?.isAgent || active.isAgent ? "agentIcon" : ""}`}>{activeSummary?.isAgent || active.isAgent ? <Bot size={22} /> : active.type === "group" ? <Users size={22} /> : <MessageCircle size={22} />}</span>
               <div>
                 <strong>{activeSummary?.title || active.title || "会话"}</strong>
-                <small>{active.type === "group" ? `${members.length} 位成员` : "单聊"}</small>
+                <small>{activeSummary?.isAgent || active.isAgent ? agentRole(currentAgent) : active.type === "group" ? `${members.length} 位成员` : "单聊"}</small>
               </div>
             </section>
+
+            {(activeSummary?.isAgent || active.isAgent) && currentAgent && (
+              <section className="agentInfoPanel">
+                <div>
+                  <b>能力说明</b>
+                  <p>{agentCapabilitySummary(currentAgent)}</p>
+                </div>
+                <div>
+                  <b>任务目标</b>
+                  <p>{agentMission(currentAgent)}</p>
+                </div>
+                {agentStyle(currentAgent) && (
+                  <div>
+                    <b>响应风格</b>
+                    <p>{agentStyle(currentAgent)}</p>
+                  </div>
+                )}
+                {currentAgent.outputContract && (
+                  <div>
+                    <b>输出约定</b>
+                    <p>{currentAgent.outputContract}</p>
+                  </div>
+                )}
+                {!!agentBoundaries(currentAgent).length && (
+                  <div>
+                    <b>能力边界</b>
+                    <ul>{agentBoundaries(currentAgent).map((item, index) => <li key={index}>{item}</li>)}</ul>
+                  </div>
+                )}
+                <div>
+                  <b>最近表现</b>
+                  {currentAgentRecentStats?.replyCount ? (
+                    <div className="agentPerformance">
+                      <span>当前会话最近 100 条内回复 {currentAgentRecentStats.replyCount} 次</span>
+                      <span>最近回复：{formatTime(currentAgentRecentStats.lastReplyAt)}</span>
+                      {currentAgentRecentStats.lastReplyPreview && <p>{currentAgentRecentStats.lastReplyPreview}</p>}
+                    </div>
+                  ) : (
+                    <p>当前会话暂无 Agent 回复记录。</p>
+                  )}
+                </div>
+                <div className="agentInfoMeta">
+                  <span>模型：{currentAgent.defaultModel || "未配置"}</span>
+                  <span>Agent ID：{currentAgent.agentId}</span>
+                </div>
+              </section>
+            )}
 
             {active.type === "group" && (
               <>

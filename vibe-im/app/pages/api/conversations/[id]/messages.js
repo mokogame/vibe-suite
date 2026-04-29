@@ -22,18 +22,19 @@ export default async function handler(req, res) {
       return res.json({ messages });
     }
     if (req.method === "POST") {
-      const { type, encryptedText, attachment, attachmentId, replyToId } = req.body || {};
+      const { type, encryptedText, attachment, attachmentId, replyToId, mentions } = req.body || {};
       let finalAttachmentId = attachmentId;
       if ((type === "image" || type === "file") && attachment) {
         finalAttachmentId = saveAttachment(auth.user.id, { ...attachment, kind: type }).id;
       }
       const text = type === "text" ? decryptText(encryptedText, auth.transportKey) : "";
-      const row = sendChatMessage(auth.user.id, conversationId, { type, text, attachmentId: finalAttachmentId, replyToId });
+      const row = sendChatMessage(auth.user.id, conversationId, { type, text, attachmentId: finalAttachmentId, replyToId, mentions });
       if (type === "text" && text.trim()) {
         replyToVibeClawAgentIfNeeded({
           userId: auth.user.id,
           conversationId,
           text,
+          mentions,
           userMessageId: row.id,
           transportKey: auth.transportKey
         }).catch(() => {});
