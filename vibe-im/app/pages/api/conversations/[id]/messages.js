@@ -2,6 +2,7 @@ const { requireAuth } = require("../../../../lib/http");
 const { listMessages, saveAttachment, serializeMessage } = require("../../../../lib/chat");
 const { sendChatMessage } = require("../../../../lib/chat-service");
 const { decryptText } = require("../../../../lib/security");
+const { replyToVibeClawAgentIfNeeded } = require("../../../../lib/vibe-claw");
 
 export const config = {
   api: {
@@ -11,7 +12,7 @@ export const config = {
   }
 };
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const auth = requireAuth(req, res);
   if (!auth) return;
   const conversationId = req.query.id;
@@ -28,6 +29,15 @@ export default function handler(req, res) {
       }
       const text = type === "text" ? decryptText(encryptedText, auth.transportKey) : "";
       const row = sendChatMessage(auth.user.id, conversationId, { type, text, attachmentId: finalAttachmentId, replyToId });
+      if (type === "text" && text.trim()) {
+        replyToVibeClawAgentIfNeeded({
+          userId: auth.user.id,
+          conversationId,
+          text,
+          userMessageId: row.id,
+          transportKey: auth.transportKey
+        }).catch(() => {});
+      }
       return res.json({ message: serializeMessage(row, auth.transportKey) });
     }
     res.status(405).json({ error: "Method not allowed" });

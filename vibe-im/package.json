@@ -6,6 +6,7 @@
     "build": "npm --prefix app run build",
     "start": "npm --prefix app run start",
     "lint": "npm --prefix app run lint",
+    "typecheck": "npm --prefix app run typecheck",
     "db:migrate": "npm --prefix app run db:migrate",
     "db:healthcheck": "npm --prefix app run db:healthcheck"
   }

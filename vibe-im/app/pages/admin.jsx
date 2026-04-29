@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
-import { ArrowLeft, Plus, RefreshCw, Shield, UserRound } from "lucide-react";
+import { ArrowLeft, Bot, Plus, RefreshCw, Shield, UserRound } from "lucide-react";
 import { useSystemNotice } from "../components/SystemNotice";
 
 async function api(path, options = {}) {
@@ -18,12 +18,19 @@ export default function AdminPage() {
   const [auth, setAuth] = useState(null);
   const [users, setUsers] = useState([]);
   const [form, setForm] = useState({ username: "", displayName: "", password: "password123", role: "user" });
+  const [clawConfig, setClawConfig] = useState({ baseUrl: "http://localhost:3100", token: "", tokenMasked: "", timeoutMs: 90000 });
+  const [clawHealth, setClawHealth] = useState(null);
+  const [clawSaving, setClawSaving] = useState(false);
+  const [clawChecking, setClawChecking] = useState(false);
   const { showError, showNotice } = useSystemNotice();
 
   useEffect(() => {
     api("/api/auth/me").then(data => {
       setAuth(data);
-      if (data.user.role === "admin") loadUsers();
+      if (data.user.role === "admin") {
+        loadUsers();
+        loadClawConfig();
+      }
     }).catch(showError);
   }, []);
 
@@ -51,6 +58,68 @@ export default function AdminPage() {
     } catch (err) {
       showError(err);
     }
+  }
+
+  async function loadClawConfig() {
+    const data = await api("/api/admin/vibe-claw-config");
+    setClawConfig({
+      baseUrl: data.config?.baseUrl || "http://localhost:3100",
+      token: "",
+      tokenMasked: data.config?.tokenMasked || "",
+      timeoutMs: data.config?.timeoutMs || 90000
+    });
+    setClawHealth(data.health || null);
+  }
+
+  async function saveClawConfig(event) {
+    event.preventDefault();
+    setClawSaving(true);
+    try {
+      const payload = {
+        baseUrl: clawConfig.baseUrl,
+        timeoutMs: Number(clawConfig.timeoutMs) || 90000
+      };
+      if (clawConfig.token.trim()) payload.token = clawConfig.token.trim();
+      const data = await api("/api/admin/vibe-claw-config", { method: "PATCH", body: payload });
+      setClawConfig({
+        baseUrl: data.config?.baseUrl || payload.baseUrl,
+        token: "",
+        tokenMasked: data.config?.tokenMasked || "",
+        timeoutMs: data.config?.timeoutMs || payload.timeoutMs
+      });
+      setClawHealth(data.health || null);
+      showNotice("Vibe Claw 配置已保存");
+    } catch (err) {
+      showError(err);
+    } finally {
+      setClawSaving(false);
+    }
+  }
+
+  async function diagnoseClaw() {
+    setClawChecking(true);
+    try {
+      await loadClawConfig();
+      showNotice("连接诊断已完成");
+    } catch (err) {
+      showError(err);
+    } finally {
+      setClawChecking(false);
+    }
+  }
+
+  async function refreshAll() {
+    await Promise.all([loadUsers(), loadClawConfig()]);
+  }
+
+  function healthLabel(status) {
+    return {
+      online: "在线",
+      config_error: "配置异常",
+      model_unavailable: "模型不可用",
+      agent_unavailable: "Agent 不可用",
+      timeout: "连接超时"
+    }[status] || "未知";
   }
 
   const activeUserCount = users.filter(user => user.status === "active").length;
@@ -112,7 +181,7 @@ export default function AdminPage() {
               <h1>用户管理</h1>
               <p>创建账号、调整角色，并管理用户启用状态。</p>
             </div>
-            <button className="secondaryButton" type="button" onClick={loadUsers}><RefreshCw size={16} />刷新</button>
+            <button className="secondaryButton" type="button" onClick={refreshAll}><RefreshCw size={16} />刷新</button>
           </header>
 
           <section className="adminMetricGrid">
@@ -143,6 +212,48 @@ export default function AdminPage() {
                 </select>
               </label>
               <button className="primaryButton" type="submit">创建</button>
+            </form>
+
+            <form className="adminCard clawConfigCard" onSubmit={saveClawConfig}>
+              <h2><Bot size={18} />Vibe Claw 接入</h2>
+              <p className="adminCardHint">配置 vibe-im 调用 vibe-claw 的服务地址、访问令牌和超时时间。令牌保存后仅掩码显示。</p>
+              <label>Base URL
+                <input
+                  value={clawConfig.baseUrl}
+                  onChange={event => setClawConfig(current => ({ ...current, baseUrl: event.target.value }))}
+                  placeholder="http://localhost:3100"
+                />
+              </label>
+              <label>API Token
+                <input
+                  type="password"
+                  value={clawConfig.token}
+                  onChange={event => setClawConfig(current => ({ ...current, token: event.target.value }))}
+                  placeholder={clawConfig.tokenMasked ? `当前：${clawConfig.tokenMasked}` : "dev-token"}
+                />
+              </label>
+              <label>超时毫秒
+                <input
+                  type="number"
+                  min="5000"
+                  step="1000"
+                  value={clawConfig.timeoutMs}
+                  onChange={event => setClawConfig(current => ({ ...current, timeoutMs: event.target.value }))}
+                />
+              </label>
+              <div className={`clawHealthCard ${clawHealth?.status || "unknown"}`}>
+                <strong>{healthLabel(clawHealth?.status)}</strong>
+                <span>{clawHealth?.message || "尚未诊断"}</span>
+                <small>{clawHealth?.latencyMs ? `${clawHealth.latencyMs}ms` : "等待连接检查"}</small>
+              </div>
+              <div className="adminActionRow">
+                <button className="secondaryButton" type="button" onClick={diagnoseClaw} disabled={clawChecking}>
+                  {clawChecking ? "诊断中..." : "连接诊断"}
+                </button>
+                <button className="primaryButton" type="submit" disabled={clawSaving}>
+                  {clawSaving ? "保存中..." : "保存配置"}
+                </button>
+              </div>
             </form>
 
             <section className="adminCard tableCard">

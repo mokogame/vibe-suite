@@ -240,14 +240,17 @@ function listConversations(userId) {
     let latestPlain = row.latest_type === "text" && row.latest_content
       ? decryptText(JSON.parse(row.latest_content), STORE_KEY)
       : row.latest_type ? `[${row.latest_type}]` : "";
+    const other = row.type === "direct" ? getDirectOtherUser(userId, row.id) : null;
     return {
       id: row.id,
       type: row.type,
-      title: conversationTitle(userId, row),
+      title: row.type === "group" ? (row.title || "未命名群聊") : (other ? other.display_name : "单聊"),
       memberCount: row.member_count,
       latestText: latestPlain,
       latestAt: row.latest_at,
-      unread: Math.max(0, Number(row.latest_seq || 0) - Number(row.last_read_seq || 0))
+      unread: Math.max(0, Number(row.latest_seq || 0) - Number(row.last_read_seq || 0)),
+      isAgent: other?.role === "agent",
+      otherUser: other ? publicUser(other) : null
     };
   });
 }

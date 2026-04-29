@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Head from "next/head";
 import {
+  Bot,
   FileUp,
   Image as ImageIcon,
   LogOut,
   MessageCircle,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Shield,
@@ -47,10 +49,199 @@ function normalizeUsernameInput(value) {
   return String(value || "").trim().replace(/^@+/, "").trim();
 }
 
-function Modal({ title, children, onClose }) {
+function isNearBottom(element, threshold = 120) {
+  if (!element) return true;
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+function isLongAgentText(text) {
+  const value = String(text || "");
+  return value.length > 900 || value.split(/\r?\n/).length > 10;
+}
+
+function safeLinkHref(value) {
+  const href = String(value || "").trim();
+  if (/^https?:\/\//i.test(href) || /^mailto:/i.test(href)) return href;
+  return "#";
+}
+
+function renderInlineMarkdown(text) {
+  const source = String(text || "");
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(source)) !== null) {
+    if (match.index > lastIndex) parts.push(source.slice(lastIndex, match.index));
+    const token = match[0];
+    const key = `${match.index}-${token}`;
+
+    if (token.startsWith("**") && token.endsWith("**")) {
+      parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      parts.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      parts.push(
+        <a key={key} href={safeLinkHref(link?.[2])} target="_blank" rel="noreferrer">
+          {link?.[1] || token}
+        </a>
+      );
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < source.length) parts.push(source.slice(lastIndex));
+  return parts.length ? parts : source;
+}
+
+function headingId(index) {
+  return `reader-heading-${index}`;
+}
+
+function extractMarkdownHeadings(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line, lineIndex) => ({ line: line.trim(), lineIndex }))
+    .filter(item => /^(#{1,3})\s+(.+)$/.test(item.line))
+    .map((item, index) => {
+      const match = item.line.match(/^(#{1,3})\s+(.+)$/);
+      return { id: headingId(index), level: match[1].length, text: match[2] };
+    });
+}
+
+function renderRichText(text, options = {}) {
+  const lines = String(text || "").split(/\r?\n/);
+  const blocks = [];
+  let paragraph = [];
+  let list = [];
+  let listKind = "unordered";
+  let code = [];
+  let inCode = false;
+  let headingIndex = 0;
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    blocks.push({ type: "paragraph", text: paragraph.join("\n") });
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!list.length) return;
+    blocks.push({ type: "list", kind: listKind, items: list });
+    list = [];
+    listKind = "unordered";
+  }
+
+  function flushCode() {
+    blocks.push({ type: "code", text: code.join("\n") });
+    code = [];
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inCode = true;
+      }
+      continue;
+    }
+
+    if (inCode) {
+      code.push(line);
+      continue;
+    }
+
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "rule" });
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", level: heading[1].length, text: heading[2] });
+      continue;
+    }
+
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const nextKind = ordered ? "ordered" : "unordered";
+      if (list.length && listKind !== nextKind) flushList();
+      listKind = nextKind;
+      list.push((unordered || ordered)[1]);
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  if (inCode) flushCode();
+  flushParagraph();
+  flushList();
+
+  if (!blocks.length) return <p>{text}</p>;
+
+  return blocks.map((block, index) => {
+    if (block.type === "heading") {
+      const Tag = block.level === 1 ? "h3" : block.level === 2 ? "h4" : "h5";
+      const id = options.withHeadingIds ? headingId(headingIndex++) : undefined;
+      return <Tag id={id} key={index}>{renderInlineMarkdown(block.text)}</Tag>;
+    }
+    if (block.type === "list") {
+      const Tag = block.kind === "ordered" ? "ol" : "ul";
+      return (
+        <Tag key={index}>
+          {block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}
+        </Tag>
+      );
+    }
+    if (block.type === "code") {
+      return (
+        <div className="codeBlock" key={index}>
+          {options.onCopyCode && (
+            <button type="button" onClick={() => options.onCopyCode(block.text)}>复制代码</button>
+          )}
+          <pre><code>{block.text}</code></pre>
+        </div>
+      );
+    }
+    if (block.type === "rule") {
+      return <hr key={index} />;
+    }
+    return <p key={index}>{renderInlineMarkdown(block.text)}</p>;
+  });
+}
+
+function MessageText({ text, onCopyCode }) {
+  return <div className="messageText">{renderRichText(text, { onCopyCode })}</div>;
+}
+
+function Modal({ title, children, onClose, className = "" }) {
   return (
     <div className="modalBackdrop" onMouseDown={onClose}>
-      <div className="modal" onMouseDown={event => event.stopPropagation()}>
+      <div className={`modal ${className}`.trim()} onMouseDown={event => event.stopPropagation()}>
         <div className="modalHeader">
           <h3>{title}</h3>
           <button className="modalClose" type="button" onClick={onClose}>×</button>
@@ -120,8 +311,7 @@ function UserSuggestInput({ value, onChange, onPick, placeholder, excludeUserIds
       width: `${width}px`,
       minWidth: `${minWidth}px`,
       maxWidth: `${maxWidth}px`,
-      height: `${visibleRows * rowHeight}px`,
-      overflowY: nextResults.length > 10 ? "auto" : "hidden"
+      maxHeight: `${visibleRows * rowHeight}px`
     });
   }
 
@@ -162,10 +352,14 @@ function UserSuggestInput({ value, onChange, onPick, placeholder, excludeUserIds
     if (!open || !results.length) return;
     updateFloatingPosition();
     window.addEventListener("resize", updateFloatingPosition);
-    window.addEventListener("scroll", updateFloatingPosition, true);
+    function repositionOnWindowScroll(event) {
+      if (listRef.current?.contains(event.target)) return;
+      updateFloatingPosition();
+    }
+    window.addEventListener("scroll", repositionOnWindowScroll, true);
     return () => {
       window.removeEventListener("resize", updateFloatingPosition);
-      window.removeEventListener("scroll", updateFloatingPosition, true);
+      window.removeEventListener("scroll", repositionOnWindowScroll, true);
     };
   }, [open, results.length]);
 
@@ -185,6 +379,14 @@ function UserSuggestInput({ value, onChange, onPick, placeholder, excludeUserIds
     onPick(user);
     setOpen(false);
     setResults([]);
+  }
+
+  function userKind(user) {
+    return user.role === "agent" ? "agent" : "user";
+  }
+
+  function userKindLabel(user) {
+    return userKind(user) === "agent" ? "Agent" : "真人";
   }
 
   function reopenSuggestions() {
@@ -219,12 +421,19 @@ function UserSuggestInput({ value, onChange, onPick, placeholder, excludeUserIds
         }}
       />
       {open && results.length > 0 && (
-        <div ref={listRef} className="suggestList" style={floatingStyle || undefined}>
+        <div
+          ref={listRef}
+          className="suggestList"
+          style={floatingStyle || undefined}
+          onWheel={event => event.stopPropagation()}
+        >
           {results.map(user => (
             <button type="button" key={user.id} onMouseDown={event => event.preventDefault()} onClick={() => pick(user)}>
-              <UserRound size={16} />
+              <span className={`suggestAvatar ${userKind(user)}`}>
+                {userKind(user) === "agent" ? <Bot size={15} /> : <UserRound size={15} />}
+              </span>
               <span>
-                <strong>{user.displayName}</strong>
+                <strong>{user.displayName}<em className={`suggestKind ${userKind(user)}`}>{userKindLabel(user)}</em></strong>
                 <small>@{user.username}</small>
               </span>
             </button>
@@ -242,8 +451,14 @@ export default function Home() {
   const [active, setActive] = useState(null);
   const [messages, setMessages] = useState([]);
   const [plainTextById, setPlainTextById] = useState({});
+  const [agentThinkingByConversation, setAgentThinkingByConversation] = useState({});
   const [members, setMembers] = useState([]);
   const [friends, setFriends] = useState([]);
+  const [clawAgents, setClawAgents] = useState([]);
+  const [clawLoading, setClawLoading] = useState(false);
+  const [clawHealth, setClawHealth] = useState(null);
+  const [agentSearch, setAgentSearch] = useState("");
+  const [agentFilter, setAgentFilter] = useState("all");
   const [activeTab, setActiveTab] = useState("chats");
   const [searchText, setSearchText] = useState("");
   const [searchUsers, setSearchUsers] = useState([]);
@@ -254,12 +469,24 @@ export default function Home() {
   const [draft, setDraft] = useState("");
   const [modal, setModal] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
+  const [expandedMessages, setExpandedMessages] = useState({});
+  const [readerMessage, setReaderMessage] = useState(null);
+  const [sendingByConversation, setSendingByConversation] = useState({});
+  const [failedMessages, setFailedMessages] = useState([]);
+  const [agentTimeoutByConversation, setAgentTimeoutByConversation] = useState({});
   const wsRef = useRef(null);
+  const messageListRef = useRef(null);
   const bottomRef = useRef(null);
   const composerInputRef = useRef(null);
+  const shouldStickToBottomRef = useRef(true);
+  const forceScrollNextRef = useRef(false);
+  const sendLockRef = useRef(new Set());
   const { showError, showNotice } = useSystemNotice();
 
   const transportKey = auth?.transportKey || "";
+  const latestMessageId = messages[messages.length - 1]?.id || "";
+  const activeAgentThinking = Boolean(active && agentThinkingByConversation[active.id]);
+  const activeSending = Boolean(active && sendingByConversation[active.id]);
 
   useEffect(() => {
     api("/api/auth/me").then(setAuth).catch(() => setAuth(null));
@@ -275,6 +502,10 @@ export default function Home() {
     ws.onmessage = event => {
       const data = JSON.parse(event.data);
       if (data.type === "message") {
+        if (data.message.type === "system" || data.message.sender?.id !== auth.user.id) {
+          setAgentThinkingByConversation(current => ({ ...current, [data.message.conversationId]: false }));
+          setAgentTimeoutByConversation(current => ({ ...current, [data.message.conversationId]: false }));
+        }
         setMessages(current => {
           if (data.message.conversationId !== active?.id) return current;
           if (current.some(item => item.id === data.message.id)) return current;
@@ -288,10 +519,11 @@ export default function Home() {
       }
     };
     return () => ws.close();
-  }, [auth?.token, active?.id]);
+  }, [auth?.token, auth?.user?.id, active?.id]);
 
   useEffect(() => {
     if (!active || !transportKey) return;
+    forceScrollNextRef.current = true;
     api(`/api/conversations/${encodeURIComponent(active.id)}/messages?limit=100`)
       .then(data => setMessages(data.messages || []))
       .catch(showError);
@@ -299,6 +531,18 @@ export default function Home() {
       .then(data => setMembers(data.members || []))
       .catch(showError);
   }, [active?.id, transportKey]);
+
+  useEffect(() => {
+    if (activeTab === "agents") loadClawAgents();
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!active || !activeAgentThinking) return;
+    const timer = setTimeout(() => {
+      setAgentTimeoutByConversation(current => ({ ...current, [active.id]: true }));
+    }, 45000);
+    return () => clearTimeout(timer);
+  }, [active?.id, activeAgentThinking]);
 
   useEffect(() => {
     if (!active) return;
@@ -324,7 +568,6 @@ export default function Home() {
   }, [messages, transportKey]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     if (active && messages.length) {
       const latest = messages[messages.length - 1];
       api(`/api/conversations/${encodeURIComponent(active.id)}`, {
@@ -332,7 +575,66 @@ export default function Home() {
         body: { action: "read", seq: latest.seq }
       }).then(loadConversations).catch(() => {});
     }
-  }, [messages.length, active?.id]);
+  }, [latestMessageId, active?.id]);
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    const element = messageListRef.current;
+    if (!element) return;
+    const latest = messages[messages.length - 1];
+    const shouldScroll =
+      forceScrollNextRef.current ||
+      shouldStickToBottomRef.current ||
+      latest?.sender?.id === auth?.user?.id ||
+      activeAgentThinking;
+
+    if (!shouldScroll) return;
+    requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+      shouldStickToBottomRef.current = true;
+      forceScrollNextRef.current = false;
+    });
+  }, [latestMessageId, active?.id, auth?.user?.id, activeAgentThinking]);
+
+  function handleMessageListScroll(event) {
+    shouldStickToBottomRef.current = isNearBottom(event.currentTarget);
+  }
+
+  async function copyMessageText(text) {
+    try {
+      await navigator.clipboard.writeText(text || "");
+      showNotice("已复制消息内容");
+    } catch (err) {
+      showError(new Error("复制失败，请检查浏览器剪贴板权限"));
+    }
+  }
+
+  function exportMarkdown(text, fileName = "agent-reply.md") {
+    const blob = new Blob([String(text || "")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function agentStatusFor(agent) {
+    if (clawHealth && clawHealth.status !== "online") return clawHealth.status;
+    if (!agent.defaultModel) return "model_unavailable";
+    if (agent.lastError) return "config_error";
+    return agent.status === "active" ? "online" : "config_error";
+  }
+
+  function agentStatusText(status) {
+    return {
+      online: "在线",
+      config_error: "配置异常",
+      model_unavailable: "模型不可用",
+      agent_unavailable: "Agent 不可用",
+      timeout: "连接超时"
+    }[status] || "未知";
+  }
 
   async function login(event) {
     event.preventDefault();
@@ -357,6 +659,30 @@ export default function Home() {
   async function loadFriends() {
     const data = await api("/api/friends");
     setFriends(data.friends || []);
+  }
+
+  async function loadClawAgents() {
+    setClawLoading(true);
+    try {
+      const data = await api("/api/vibe-claw/agents");
+      setClawAgents(data.agents || []);
+      setClawHealth(data.health || null);
+    } catch (err) {
+      showError(err);
+    } finally {
+      setClawLoading(false);
+    }
+  }
+
+  async function openAgentConversation(agent) {
+    try {
+      const data = await api(`/api/vibe-claw/agents/${encodeURIComponent(agent.agentId)}/start`, { method: "POST" });
+      setActive(data.conversation);
+      setActiveTab("chats");
+      await loadConversations();
+    } catch (err) {
+      showError(err);
+    }
   }
 
   async function search() {
@@ -533,18 +859,52 @@ export default function Home() {
     }
   }
 
+  async function sendTextMessage(text, retryLocalId = null) {
+    if (!active || !text.trim()) return;
+    if (sendLockRef.current.has(active.id) || sendingByConversation[active.id]) return;
+    const isAgentConversation = activeSummary?.isAgent || active.isAgent;
+    sendLockRef.current.add(active.id);
+    setSendingByConversation(current => ({ ...current, [active.id]: true }));
+    try {
+      const encryptedText = await encryptText(text.trim(), transportKey);
+      if (isAgentConversation) {
+        setAgentThinkingByConversation(current => ({ ...current, [active.id]: true }));
+        setAgentTimeoutByConversation(current => ({ ...current, [active.id]: false }));
+      }
+      if (retryLocalId) setFailedMessages(current => current.filter(item => item.localId !== retryLocalId));
+      forceScrollNextRef.current = true;
+      await api(`/api/conversations/${encodeURIComponent(active.id)}/messages`, {
+        method: "POST",
+        body: { type: "text", encryptedText }
+      });
+      setDraft("");
+      requestAnimationFrame(() => {
+        composerInputRef.current?.focus({ preventScroll: true });
+      });
+    } catch (err) {
+      if (isAgentConversation) {
+        setAgentThinkingByConversation(current => ({ ...current, [active.id]: false }));
+      }
+      const failed = {
+        localId: retryLocalId || `failed_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        conversationId: active.id,
+        text: text.trim(),
+        error: err.message || "发送失败",
+        createdAt: new Date().toISOString()
+      };
+      setFailedMessages(current => retryLocalId
+        ? [...current.filter(item => item.localId !== retryLocalId), failed]
+        : [...current, failed]);
+      showError(err);
+    } finally {
+      sendLockRef.current.delete(active.id);
+      setSendingByConversation(current => ({ ...current, [active.id]: false }));
+    }
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
-    if (!active || !draft.trim()) return;
-    const encryptedText = await encryptText(draft.trim(), transportKey);
-    await api(`/api/conversations/${encodeURIComponent(active.id)}/messages`, {
-      method: "POST",
-      body: { type: "text", encryptedText }
-    });
-    setDraft("");
-    requestAnimationFrame(() => {
-      composerInputRef.current?.focus({ preventScroll: true });
-    });
+    await sendTextMessage(draft);
   }
 
   async function uploadAndSend(event) {
@@ -573,7 +933,32 @@ export default function Home() {
 
   const activeSummary = useMemo(() => conversations.find(item => item.id === active?.id), [conversations, active?.id]);
   const groupConversations = useMemo(() => conversations.filter(item => item.type === "group"), [conversations]);
-  const visibleConversations = activeTab === "groups" ? groupConversations : conversations;
+  const moduleMeta = {
+    chats: { label: "消息", title: "消息", hint: "继续最近对话，或搜索用户发起新聊天。" },
+    friends: { label: "联系人", title: "联系人", hint: "管理好友，搜索用户并发起单聊。" },
+    agents: { label: "智能体", title: "智能体", hint: "连接 Vibe Claw Agent，进入对话或继续协作。" },
+    groups: { label: "群组", title: "群组", hint: "查看群聊，创建多人会话。" }
+  };
+  const currentModule = moduleMeta[activeTab] || moduleMeta.chats;
+  const recentAgentUserIds = useMemo(() => new Set(conversations.filter(item => item.isAgent && item.otherUser?.id).map(item => item.otherUser.id)), [conversations]);
+  const currentAgent = useMemo(() => {
+    const userId = activeSummary?.otherUser?.id || active?.otherUser?.id;
+    return clawAgents.find(agent => agent.userId === userId) || active?.agent || activeSummary?.agent || null;
+  }, [activeSummary, active, clawAgents]);
+  const filteredAgents = useMemo(() => {
+    const query = agentSearch.trim().toLowerCase();
+    return clawAgents.filter(agent => {
+      const status = agentStatusFor(agent);
+      const matchesQuery = !query || `${agent.name} ${agent.description} ${agent.defaultModel}`.toLowerCase().includes(query);
+      const matchesFilter =
+        agentFilter === "all" ||
+        (agentFilter === "recent" && recentAgentUserIds.has(agent.userId)) ||
+        (agentFilter === "online" && status === "online") ||
+        (agentFilter === "issue" && status !== "online");
+      return matchesQuery && matchesFilter;
+    });
+  }, [clawAgents, agentSearch, agentFilter, recentAgentUserIds, clawHealth]);
+  const activeConversationFailedMessages = useMemo(() => failedMessages.filter(item => item.conversationId === active?.id), [failedMessages, active?.id]);
   const createMemberUserIds = useMemo(() => [auth?.user?.id, ...createMembers.map(user => user.id)].filter(Boolean), [auth?.user?.id, createMembers]);
   const activeMemberUserIds = useMemo(() => members.map(member => member.id), [members]);
   const activeMember = useMemo(() => members.find(member => member.id === auth?.user?.id), [members, auth?.user?.id]);
@@ -606,105 +991,172 @@ export default function Home() {
         <title>vibe-im</title>
       </Head>
       <main className="appShell">
-        <aside className="sidebar">
-        <div className="profileBar">
-          <div className="avatar">{String(auth.user.displayName || auth.user.username || "?").slice(0, 1).toUpperCase()}</div>
-          <div><strong>{auth.user.displayName}</strong><span>@{auth.user.username}</span></div>
-          <div className="iconRow">
-            {auth.user.role === "admin" && <a href="/admin" title="后台"><Settings size={18} /></a>}
-            <button type="button" title="退出" onClick={logout}><LogOut size={18} /></button>
+        <nav className="navRail" aria-label="主导航">
+          <div className="railProfile" title={`${auth.user.displayName} @${auth.user.username}`}>
+            {String(auth.user.displayName || auth.user.username || "?").slice(0, 1).toUpperCase()}
           </div>
-        </div>
-
-        <div className="tabs">
-          <button className={activeTab === "chats" ? "active" : ""} type="button" onClick={() => setActiveTab("chats")}><MessageCircle size={16} />聊天</button>
-          <button className={activeTab === "friends" ? "active" : ""} type="button" onClick={() => setActiveTab("friends")}><UserRound size={16} />好友</button>
-          <button className={activeTab === "groups" ? "active" : ""} type="button" onClick={() => setActiveTab("groups")}><Users size={16} />群聊</button>
-        </div>
-
-        <section className="sidebarSection">
-          <form className="searchBox" onSubmit={event => { event.preventDefault(); search(); }}>
-            <Search size={17} />
-            <UserSuggestInput
-              value={searchText}
-              onChange={value => setSearchText(value)}
-              onPick={user => {
-                setSearchText(`@${user.username}`);
-                setSearchUsers([user]);
-              }}
-              placeholder="搜索用户 username"
-            />
-            <button type="submit">查找</button>
-          </form>
-          {!!searchUsers.length && (
-            <div className="searchResults">
-              {searchUsers.map(user => (
-                <div className="searchResultRow" key={user.id}>
-                  <UserRound size={16} />
-                  <span><strong>{user.displayName}</strong><small>@{user.username}</small></span>
-                  <div className="searchResultActions">
-                    {!user.isFriend && (
-                      <button type="button" title="添加好友" onClick={() => addFriend(user.username)}>
-                        <UserPlus size={15} />
-                      </button>
-                    )}
-                    <button type="button" title="发起单聊" onClick={() => openDirect(user.username)}>
-                      <MessageCircle size={15} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="conversationList">
-          <div className="listHeader">
-            <span>{activeTab === "groups" ? "群聊" : activeTab === "friends" ? "好友" : "最近聊天"}</span>
-            <button
-              className="listAddButton"
-              type="button"
-              title="创建群聊"
-              onClick={() => setModal("createGroup")}
-            >
-              <Plus size={16} />
+          <div className="railNavGroup">
+            <button className={activeTab === "chats" ? "active" : ""} type="button" onClick={() => setActiveTab("chats")} title="消息">
+              <MessageCircle size={20} />
+              <span>消息</span>
+            </button>
+            <button className={activeTab === "friends" ? "active" : ""} type="button" onClick={() => setActiveTab("friends")} title="联系人">
+              <UserRound size={20} />
+              <span>联系人</span>
+            </button>
+            <button className={activeTab === "agents" ? "active" : ""} type="button" onClick={() => setActiveTab("agents")} title="智能体">
+              <Bot size={20} />
+              <span>智能体</span>
+            </button>
+            <button className={activeTab === "groups" ? "active" : ""} type="button" onClick={() => setActiveTab("groups")} title="群组">
+              <Users size={20} />
+              <span>群组</span>
             </button>
           </div>
-          {activeTab === "friends" ? (
-            <>
-              {friends.map(friend => (
-                <button className="conversationItem" key={friend.id} onClick={() => openDirect(friend.username)}>
-                  <span className="conversationIcon"><UserRound size={18} /></span>
-                  <span className="conversationMeta">
-                    <strong>{friend.displayName}</strong>
-                    <small>@{friend.username}</small>
-                  </span>
-                </button>
-              ))}
-              {!friends.length && <div className="sideEmpty">暂无好友，可通过上方 username 搜索添加。</div>}
-            </>
-          ) : (
-            <>
-              {visibleConversations.map(item => (
-                <button className={`conversationItem ${active?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => setActive(item)}>
-                  <span className="conversationIcon">{item.type === "group" ? <Users size={18} /> : <MessageCircle size={18} />}</span>
-                  <span className="conversationMeta">
-                    <strong>{item.title}</strong>
-                    <small>{item.latestText || "暂无消息"}</small>
-                  </span>
-                  {item.unread > 0 && <b>{item.unread}</b>}
-                </button>
-              ))}
-              {!visibleConversations.length && (
-                <div className="sideEmpty">{activeTab === "groups" ? "暂无群聊，可通过右上角加号创建。" : "暂无聊天，可搜索用户发起单聊或创建群聊。"}</div>
-              )}
-            </>
-          )}
-        </section>
+          <div className="railBottom">
+            {auth.user.role === "admin" && <a href="/admin" title="管理后台"><Shield size={20} /><span>后台</span></a>}
+            <button type="button" title="退出登录" onClick={logout}><LogOut size={20} /><span>退出</span></button>
+          </div>
+        </nav>
 
-        <footer className="sidebarFooter">
-          {auth.user.role === "admin" && <a className="adminLink" href="/admin"><Shield size={16} />管理后台</a>}
-        </footer>
+        <aside className="sidebar">
+          <header className="sidebarHeader">
+            <div>
+              <span className="sidebarEyebrow">{auth.user.displayName} · @{auth.user.username}</span>
+              <h2>{currentModule.title}</h2>
+              <p>{currentModule.hint}</p>
+            </div>
+            {activeTab === "agents" ? (
+              <button className="listAddButton" type="button" title="同步智能体" onClick={loadClawAgents}>
+                <RefreshCw className={clawLoading ? "spinIcon" : ""} size={16} />
+              </button>
+            ) : activeTab === "groups" ? (
+              <button className="listAddButton" type="button" title="创建群聊" onClick={() => setModal("createGroup")}>
+                <Plus size={16} />
+              </button>
+            ) : null}
+          </header>
+
+          {(activeTab === "chats" || activeTab === "friends") && (
+            <section className="sidebarSection">
+              <form className="searchBox" onSubmit={event => { event.preventDefault(); search(); }}>
+                <Search size={17} />
+                <UserSuggestInput
+                  value={searchText}
+                  onChange={value => setSearchText(value)}
+                  onPick={user => {
+                    setSearchText(`@${user.username}`);
+                    setSearchUsers([user]);
+                  }}
+                  placeholder={activeTab === "friends" ? "搜索联系人 username" : "搜索用户或开始聊天"}
+                />
+                <button type="submit">查找</button>
+              </form>
+              {!!searchUsers.length && (
+                <div className="searchResults">
+                  {searchUsers.map(user => (
+                    <div className="searchResultRow" key={user.id}>
+                      <UserRound size={16} />
+                      <span><strong>{user.displayName}</strong><small>@{user.username}</small></span>
+                      <div className="searchResultActions">
+                        {!user.isFriend && (
+                          <button type="button" title="添加好友" onClick={() => addFriend(user.username)}>
+                            <UserPlus size={15} />
+                          </button>
+                        )}
+                        <button type="button" title="发起单聊" onClick={() => openDirect(user.username)}>
+                          <MessageCircle size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {activeTab === "agents" && (
+            <section className="sidebarSection agentConnector">
+              <div className={`agentHealthBadge ${clawHealth?.status || "unknown"}`}>
+                {clawHealth ? `${agentStatusText(clawHealth.status)} · ${clawHealth.message || "等待诊断"}` : "尚未诊断连接"}
+              </div>
+              <input value={agentSearch} onChange={event => setAgentSearch(event.target.value)} placeholder="搜索智能体 / 模型" />
+              <select value={agentFilter} onChange={event => setAgentFilter(event.target.value)}>
+                <option value="all">全部 Agent</option>
+                <option value="recent">最近使用</option>
+                <option value="online">在线可用</option>
+                <option value="issue">异常/不可用</option>
+              </select>
+              <button className="secondaryButton" type="button" onClick={loadClawAgents} disabled={clawLoading}>
+                {clawLoading ? "同步中..." : "同步智能体"}
+              </button>
+            </section>
+          )}
+
+          <section className="conversationList">
+            <div className="listHeader">
+              <span>{activeTab === "chats" ? "最近会话" : activeTab === "friends" ? "好友列表" : activeTab === "agents" ? "可用智能体" : "群聊列表"}</span>
+            </div>
+            {activeTab === "friends" ? (
+              <>
+                {friends.map(friend => (
+                  <button className="conversationItem" key={friend.id} onClick={() => openDirect(friend.username)}>
+                    <span className="conversationIcon"><UserRound size={18} /></span>
+                    <span className="conversationMeta">
+                      <strong>{friend.displayName}</strong>
+                      <small>@{friend.username}</small>
+                    </span>
+                  </button>
+                ))}
+                {!friends.length && <div className="sideEmpty">暂无好友，可通过上方 username 搜索添加。</div>}
+              </>
+            ) : activeTab === "agents" ? (
+              <>
+                {filteredAgents.map(agent => {
+                  const status = agentStatusFor(agent);
+                  const continued = recentAgentUserIds.has(agent.userId);
+                  return (
+                    <button className="conversationItem agentItem" key={agent.agentId} onClick={() => openAgentConversation(agent)}>
+                      <span className="conversationIcon agentIcon"><Bot size={18} /></span>
+                      <span className="conversationMeta">
+                        <strong>{agent.name}<em className={`agentStatusDot ${status}`}>{agentStatusText(status)}</em></strong>
+                        <small>{agent.defaultModel || "未配置模型"} · {continued ? "继续对话" : "开始对话"}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+                {!filteredAgents.length && <div className="sideEmpty">暂无匹配智能体。请确认 Vibe Claw 已启动并创建 Agent。</div>}
+              </>
+            ) : activeTab === "groups" ? (
+              <>
+                {groupConversations.map(item => (
+                  <button className={`conversationItem ${active?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => setActive(item)}>
+                    <span className="conversationIcon"><Users size={18} /></span>
+                    <span className="conversationMeta">
+                      <strong>{item.title}</strong>
+                      <small>{item.latestText || "暂无消息"}</small>
+                    </span>
+                    {item.unread > 0 && <b>{item.unread}</b>}
+                  </button>
+                ))}
+                {!groupConversations.length && <div className="sideEmpty">暂无群聊，可通过上方加号创建。</div>}
+              </>
+            ) : (
+              <>
+                {conversations.map(item => (
+                  <button className={`conversationItem ${active?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => setActive(item)}>
+                    <span className={`conversationIcon ${item.isAgent ? "agentIcon" : ""}`}>{item.isAgent ? <Bot size={18} /> : item.type === "group" ? <Users size={18} /> : <MessageCircle size={18} />}</span>
+                    <span className="conversationMeta">
+                      <strong>{item.title}</strong>
+                      <small>{item.latestText || "暂无消息"}</small>
+                    </span>
+                    {item.unread > 0 && <b>{item.unread}</b>}
+                  </button>
+                ))}
+                {!conversations.length && <div className="sideEmpty">暂无聊天，可搜索用户发起单聊或创建群聊。</div>}
+              </>
+            )}
+          </section>
         </aside>
 
         <section className="chatPane">
@@ -714,13 +1166,28 @@ export default function Home() {
               <div className="chatHeaderPrimary">
                 <div>
                   <h2>{activeSummary?.title || active.title || "会话"}</h2>
-                  <span>{active.type === "group" ? `${members.length} 位成员` : "2 位成员"}</span>
+                  <span>
+                    {activeSummary?.isAgent || active.isAgent
+                      ? `Vibe Claw 智能体 · ${agentStatusText(currentAgent ? agentStatusFor(currentAgent) : clawHealth?.status || "online")}`
+                      : active.type === "group" ? `${members.length} 位成员` : "2 位成员"}
+                  </span>
                 </div>
                 <button className="secondaryButton compactButton" type="button" onClick={() => setModal("chatInfo")}><UserPlus size={15} />成员</button>
               </div>
             </header>
 
-            <div className="messageList">
+            <div className="messageList" ref={messageListRef} onScroll={handleMessageListScroll}>
+              {(activeSummary?.isAgent || active.isAgent) && !messages.length && (
+                <article className="agentWelcome">
+                  <strong>{currentAgent?.name || activeSummary?.title || active.title}</strong>
+                  <p>{currentAgent?.description || "这是一个来自 Vibe Claw 的智能体。你可以直接发送问题开始对话。"}</p>
+                  <div>
+                    {["请介绍你的能力", "帮我拆解下一步任务", "给我一个简短行动清单"].map(text => (
+                      <button type="button" key={text} onClick={() => setDraft(text)}>{text}</button>
+                    ))}
+                  </div>
+                </article>
+              )}
               {messages.map(message => {
                 if (message.type === "system") {
                   return (
@@ -737,7 +1204,29 @@ export default function Home() {
                       <strong>{message.sender.displayName}</strong>
                       <time>{formatTime(message.createdAt)}</time>
                     </div>
-                    {message.type === "text" && <p>{plainTextById[message.id] || ""}</p>}
+                    {message.type === "text" && (() => {
+                      const text = plainTextById[message.id] || "";
+                      const isAgentMessage = message.sender.role === "agent";
+                      const long = isAgentMessage && isLongAgentText(text);
+                      const expanded = Boolean(expandedMessages[message.id]);
+                      if (!long) return <MessageText text={text} onCopyCode={copyMessageText} />;
+                      return (
+                        <div className={`longMessageBubble ${expanded ? "expanded" : ""}`}>
+                          <div className="longMessageContent">
+                            {renderRichText(text, { onCopyCode: copyMessageText })}
+                          </div>
+                          {!expanded && <span className="longMessageFade" />}
+                          <div className="messageActions">
+                            <button type="button" onClick={() => setExpandedMessages(current => ({ ...current, [message.id]: !expanded }))}>
+                              {expanded ? "收起" : "展开全文"}
+                            </button>
+                            <button type="button" onClick={() => setReaderMessage({ message, text })}>阅读模式</button>
+                            <button type="button" onClick={() => copyMessageText(text)}>复制</button>
+                            <button type="button" onClick={() => exportMarkdown(text, `${message.sender.displayName || "agent"}-${message.id}.md`)}>导出 Markdown</button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {message.attachment && (
                       message.attachment.kind === "image"
                         ? <a href={message.attachment.url} target="_blank" rel="noreferrer"><img src={message.attachment.url} alt={message.attachment.fileName} /></a>
@@ -746,6 +1235,36 @@ export default function Home() {
                   </article>
                 );
               })}
+              {activeAgentThinking && (
+                <article className="message agentThinking">
+                  <div className="bubbleHead">
+                    <span className="messageAvatar"><Bot size={16} /></span>
+                    <strong>{activeSummary?.title || active.title || "Agent"}</strong>
+                    <time>正在思考</time>
+                  </div>
+                  <p><span className="typingDots"><i></i><i></i><i></i></span></p>
+                </article>
+              )}
+              {active && agentTimeoutByConversation[active.id] && (
+                <article className="chatSystemMessage warning">
+                  <span>Agent 回复时间较长，仍在等待 Vibe Claw 返回。你可以稍后查看，或检查后台连接诊断。</span>
+                </article>
+              )}
+              {activeConversationFailedMessages.map(item => (
+                <article className="message own failedLocal" key={item.localId}>
+                  <div className="bubbleHead">
+                    <span className="messageAvatar">{String(auth.user.displayName || auth.user.username || "?").slice(0, 1).toUpperCase()}</span>
+                    <strong>{auth.user.displayName}</strong>
+                    <time>{formatTime(item.createdAt)} · 发送失败</time>
+                  </div>
+                  <MessageText text={item.text} onCopyCode={copyMessageText} />
+                  <div className="failedActions">
+                    <span>{item.error}</span>
+                    <button type="button" onClick={() => sendTextMessage(item.text, item.localId)}>重试</button>
+                    <button type="button" onClick={() => setFailedMessages(current => current.filter(message => message.localId !== item.localId))}>移除</button>
+                  </div>
+                </article>
+              ))}
               <div ref={bottomRef} />
             </div>
 
@@ -759,7 +1278,9 @@ export default function Home() {
                 <input type="file" onChange={uploadAndSend} />
               </label>
               <input ref={composerInputRef} value={draft} onChange={event => setDraft(event.target.value)} placeholder="输入消息，使用 @username 提及成员" />
-              <button className="primaryButton" type="submit"><Send size={18} />发送</button>
+              <button className="primaryButton" type="submit" disabled={activeSending || !draft.trim()}>
+                <Send size={18} />{activeSending ? "发送中..." : "发送"}
+              </button>
             </form>
           </>
         ) : (
@@ -862,6 +1383,32 @@ export default function Home() {
                 confirmText: "删除"
               })}><Trash2 size={16} />删除聊天</button>
             )}
+          </div>
+        </Modal>
+      )}
+      {readerMessage && (
+        <Modal title={`${readerMessage.message.sender.displayName} · 阅读模式`} onClose={() => setReaderMessage(null)} className="readerModal">
+          <div className="readerPanel">
+            <div className="readerMeta">
+              <span>{formatTime(readerMessage.message.createdAt)}</span>
+              <div className="readerActions">
+                <button className="secondaryButton" type="button" onClick={() => copyMessageText(readerMessage.text)}>复制全文</button>
+                <button className="secondaryButton" type="button" onClick={() => exportMarkdown(readerMessage.text, `${readerMessage.message.sender.displayName || "agent"}-${readerMessage.message.id}.md`)}>导出 Markdown</button>
+              </div>
+            </div>
+            <div className="readerLayout">
+              <nav className="readerToc">
+                <strong>目录</strong>
+                {extractMarkdownHeadings(readerMessage.text).length ? (
+                  extractMarkdownHeadings(readerMessage.text).map(item => (
+                    <a key={item.id} className={`level-${item.level}`} href={`#${item.id}`}>{item.text}</a>
+                  ))
+                ) : (
+                  <span>暂无标题</span>
+                )}
+              </nav>
+              <article className="readerContent">{renderRichText(readerMessage.text, { withHeadingIds: true, onCopyCode: copyMessageText })}</article>
+            </div>
           </div>
         </Modal>
       )}
