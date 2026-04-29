@@ -1,36 +1,64 @@
 import { newId, nowIso } from "./ids.js";
-import type { MemoryStore } from "../store/memory-store.js";
+import type { Store } from "../store/store.js";
 import type { ModelProvider } from "../model/providers.js";
-import type { AuthActor, CreateRunInput, RunStatus } from "../types.js";
+import { ProviderError, estimateTokens } from "../model/providers.js";
+import type { AuthActor, ContextItem, CreateRunInput, RunStatus } from "../types.js";
+import { runTool } from "../tools/registry.js";
+
+const DEFAULT_MODEL_TIMEOUT_MS = 90_000;
+const DEFAULT_CONTEXT_TOKEN_BUDGET = 6000;
 
 export class Orchestrator {
   constructor(
-    private readonly store: MemoryStore,
-    private readonly provider: ModelProvider
+    private readonly store: Store,
+    private readonly provider: ModelProvider,
+    private readonly options: { modelTimeoutMs?: number; contextTokenBudget?: number; resolveProvider?: (providerId: string | undefined, agentProviderId: string | null) => Promise<ModelProvider> } = {}
   ) {}
 
-  async runAgents(requestId: string, actor: AuthActor, input: CreateRunInput) {
-    const run = this.store.createRun(input.input);
-    this.audit(requestId, actor.name, "run.create", "run", run.id, "success", {
+  async createRun(requestId: string, actor: AuthActor, input: CreateRunInput) {
+    const run = await this.store.createRun(input.input);
+    await this.audit(requestId, actor.name, "run.create", "run", run.id, "success", {
       agentIds: input.agentIds,
       mode: input.mode ?? "sequential"
     });
-    this.event(run.id, null, "queued", "已排队", "第三方调用已创建 Agent run。");
+    await this.event(run.id, null, "queued", "已排队", "第三方调用已创建 Agent run，正在等待后台执行。" );
+    return run;
+  }
 
+  startRun(requestId: string, actor: AuthActor, runId: string, input: CreateRunInput): void {
+    void this.executeRun(requestId, actor, runId, input).catch(async (error) => {
+      const failure = normalizeFailure(error);
+      await this.store.updateRun(runId, {
+        status: "failed",
+        errorType: failure.type,
+        errorMessage: failure.message
+      });
+      await this.event(runId, null, "failed", "运行失败", failure.message);
+      await this.audit(requestId, actor.name, "run.failed", "run", runId, "failed", failure);
+    });
+  }
+
+  async executeRun(requestId: string, actor: AuthActor, runId: string, input: CreateRunInput) {
     try {
       let currentInput = input.input;
       let finalOutput = "";
       let totalTokens = 0;
-      const context = [...(input.context ?? [])];
+      const context = normalizeContext(input.context ?? []);
+      for (const toolCall of input.toolCalls ?? []) {
+        const result = await runTool(toolCall, actor);
+        context.push({ source: "tool", content: `工具 ${result.name} 输出：${result.output}`, priority: 70 });
+        await this.audit(requestId, actor.name, "tool.call.completed", "run", runId, "success", { tool: result.name });
+      }
 
       for (const agentId of input.agentIds) {
-        const agent = this.store.getAgent(agentId);
+        await this.assertNotCancelled(runId);
+        const agent = await this.store.getAgent(agentId);
         if (!agent || agent.status !== "active") {
           throw new RunFailure("invalid_agent", `Agent 不存在或不可用：${agentId}`);
         }
 
-        const step = this.store.createStep({
-          runId: run.id,
+        const step = await this.store.createStep({
+          runId,
           agentId: agent.id,
           status: "queued",
           input: currentInput,
@@ -42,25 +70,43 @@ export class Orchestrator {
           completedAt: null
         });
 
-        this.transitionRun(run.id, "building_context");
-        this.transitionStep(step.id, "building_context", "正在整理上下文", `${agent.name} 正在整理输入、共享上下文和上一步输出。`);
+        await this.transitionRun(runId, "building_context");
+        await this.transitionStep(step.id, "building_context", "正在整理上下文", `${agent.name} 正在整理输入、共享上下文和上一步输出。`);
 
-        const stepContext = finalOutput ? [...context, `上一位 Agent 输出：${finalOutput}`] : context;
+        const stepContext = trimContext(
+          finalOutput ? [...context, { source: "agent", content: `上一位 Agent 输出：${finalOutput}`, priority: 80 }] : context,
+          this.options.contextTokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
+        );
+        await this.audit(requestId, actor.name, "run.context.injected", "step", step.id, "success", {
+          contextCount: stepContext.length,
+          sensitiveCount: stepContext.filter((item) => item.sensitive).length,
+          estimatedTokens: estimateTokens(stepContext.map((item) => item.content).join("\n"))
+        });
 
-        this.transitionRun(run.id, "calling_model");
-        this.transitionStep(step.id, "calling_model", "正在调用模型", `${agent.name} 正在通过 ${this.provider.name} 生成回复。`);
+        const runtimeProvider = await this.resolveProvider(input.providerId, agent.providerId);
+        await this.transitionRun(runId, "calling_model");
+        await this.transitionStep(step.id, "calling_model", "正在调用模型", `${agent.name} 正在通过 ${runtimeProvider.name} 生成回复。`);
+        await this.audit(requestId, actor.name, "provider.call.started", "step", step.id, "success", {
+          agentId: agent.id,
+          provider: runtimeProvider.name,
+          model: agent.defaultModel
+        });
 
-        const result = await this.provider.call({
+        const providerStartedAt = Date.now();
+        const result = await runtimeProvider.call({
           requestId,
-          runId: run.id,
+          runId,
           stepId: step.id,
           agent,
           input: currentInput,
-          context: stepContext
+          context: stepContext,
+          timeoutMs: this.options.modelTimeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS
         });
 
-        this.transitionRun(run.id, "validating_output");
-        this.transitionStep(step.id, "validating_output", "正在校验输出", `${agent.name} 的输出已生成，正在进行基础校验。`);
+        const latencyMs = Date.now() - providerStartedAt;
+
+        await this.transitionRun(runId, "validating_output");
+        await this.transitionStep(step.id, "validating_output", "正在校验输出", `${agent.name} 的输出已生成，正在进行基础校验。`);
 
         if (!result.text.trim()) {
           throw new RunFailure("empty_model_output", "模型输出为空");
@@ -69,7 +115,7 @@ export class Orchestrator {
         finalOutput = result.text;
         currentInput = result.text;
         totalTokens += result.totalTokens;
-        this.store.updateStep(step.id, {
+        await this.store.updateStep(step.id, {
           status: "completed",
           output: result.text,
           inputTokens: result.inputTokens,
@@ -77,61 +123,101 @@ export class Orchestrator {
           totalTokens: result.totalTokens,
           completedAt: nowIso()
         });
-        this.event(run.id, step.id, "completed", "步骤完成", `${agent.name} 已完成本步骤。`);
-        this.audit(requestId, actor.name, "run.step.completed", "step", step.id, "success", {
+        await this.event(runId, step.id, "completed", "步骤完成", `${agent.name} 已完成本步骤。`);
+        await this.audit(requestId, actor.name, "provider.call.completed", "step", step.id, "success", {
+          provider: result.provider,
+          model: result.model,
+          totalTokens: result.totalTokens,
+          latencyMs,
+          contextSummary: stepContext.map((item) => `${item.source}:${item.content.slice(0, 80)}`).join(" | ")
+        });
+        await this.audit(requestId, actor.name, "run.step.completed", "step", step.id, "success", {
           agentId: agent.id,
           provider: result.provider,
           model: result.model,
-          totalTokens: result.totalTokens
+          totalTokens: result.totalTokens,
+          latencyMs
         });
+        const currentIndex = input.agentIds.indexOf(agentId);
+        const nextAgentId = input.agentIds[currentIndex + 1];
+        if (nextAgentId) {
+          await this.event(runId, step.id, "building_context", "正在移交任务", `${agent.name} 已完成，正在移交给下一个 Agent。`);
+          await this.audit(requestId, actor.name, "handoff.completed", "run", runId, "success", { fromAgentId: agent.id, toAgentId: nextAgentId });
+        }
       }
 
-      const completedRun = this.store.updateRun(run.id, {
+      const completedRun = await this.store.updateRun(runId, {
         status: "completed",
         output: finalOutput,
         totalTokens
       });
-      this.event(run.id, null, "completed", "运行完成", "Agent run 已完成。");
-      this.audit(requestId, actor.name, "run.completed", "run", run.id, "success", { totalTokens });
+      await this.event(runId, null, "completed", "运行完成", "Agent run 已完成。" );
+      await this.store.addArtifact({ runId, type: "text", name: "final-output", content: finalOutput });
+      await this.audit(requestId, actor.name, "run.completed", "run", runId, "success", { totalTokens });
       return {
         run: completedRun,
-        steps: this.store.listSteps(run.id),
-        events: this.store.listEvents(run.id)
+        steps: await this.store.listSteps(runId),
+        events: await this.store.listEvents(runId)
       };
     } catch (error) {
       const failure = normalizeFailure(error);
-      const failedRun = this.store.updateRun(run.id, {
-        status: "failed",
+      const failedRun = await this.store.updateRun(runId, {
+        status: failure.type === "cancelled" ? "cancelled" : "failed",
         errorType: failure.type,
         errorMessage: failure.message
       });
-      this.event(run.id, null, "failed", "运行失败", failure.message);
-      this.audit(requestId, actor.name, "run.failed", "run", run.id, "failed", failure);
+      await this.event(runId, null, failedRun.status, failedRun.status === "cancelled" ? "运行已取消" : "运行失败", failure.message);
+      await this.audit(requestId, actor.name, "run.failed", "run", runId, failedRun.status === "cancelled" ? "success" : "failed", failure);
       return {
         run: failedRun,
-        steps: this.store.listSteps(run.id),
-        events: this.store.listEvents(run.id)
+        steps: await this.store.listSteps(runId),
+        events: await this.store.listEvents(runId)
       };
     }
   }
 
-  private transitionRun(runId: string, status: RunStatus) {
-    this.store.updateRun(runId, { status });
+  async cancelRun(requestId: string, actor: AuthActor, runId: string) {
+    const run = await this.store.getRun(runId);
+    if (!run) return null;
+    if (["completed", "failed", "cancelled"].includes(run.status)) return run;
+    const cancelled = await this.store.updateRun(runId, {
+      status: "cancelled",
+      errorType: "cancelled",
+      errorMessage: "用户请求取消运行"
+    });
+    await this.event(runId, null, "cancelled", "运行已取消", "用户请求取消运行。" );
+    await this.audit(requestId, actor.name, "run.cancelled", "run", runId, "success", {});
+    return cancelled;
   }
 
-  private transitionStep(stepId: string, status: RunStatus, title: string, summary: string) {
-    const step = this.store.updateStep(stepId, {
+  private async resolveProvider(runProviderId: string | undefined, agentProviderId: string | null): Promise<ModelProvider> {
+    const providerId = runProviderId ?? agentProviderId ?? undefined;
+    if (this.options.resolveProvider) return this.options.resolveProvider(providerId, agentProviderId);
+    return this.provider;
+  }
+
+  private async assertNotCancelled(runId: string) {
+    const run = await this.store.getRun(runId);
+    if (run?.status === "cancelled") throw new RunFailure("cancelled", "运行已取消");
+  }
+
+  private async transitionRun(runId: string, status: RunStatus) {
+    await this.store.updateRun(runId, { status });
+  }
+
+  private async transitionStep(stepId: string, status: RunStatus, title: string, summary: string) {
+    const step = await this.store.updateStep(stepId, {
       status,
       startedAt: status === "building_context" ? nowIso() : undefined
     });
-    this.event(step.runId, step.id, status, title, summary);
+    await this.event(step.runId, step.id, status, title, summary);
   }
 
-  private event(runId: string, stepId: string | null, status: RunStatus, title: string, summary: string) {
-    this.store.addEvent({ runId, stepId, status, title, summary, visible: true });
+  private async event(runId: string, stepId: string | null, status: RunStatus, title: string, summary: string) {
+    await this.store.addEvent({ runId, stepId, status, title, summary, visible: true });
   }
 
-  private audit(
+  private async audit(
     requestId: string,
     actor: string,
     action: string,
@@ -140,7 +226,7 @@ export class Orchestrator {
     status: "success" | "failed",
     metadata: Record<string, unknown>
   ) {
-    this.store.addAudit({
+    await this.store.addAudit({
       id: newId("audit"),
       requestId,
       actor,
@@ -165,6 +251,34 @@ export class RunFailure extends Error {
 
 function normalizeFailure(error: unknown): { type: string; message: string } {
   if (error instanceof RunFailure) return { type: error.type, message: error.message };
+  if (error instanceof ProviderError) return { type: `provider_${error.type}`, message: error.message };
   if (error instanceof Error) return { type: "provider_error", message: error.message };
   return { type: "unknown_error", message: "未知错误" };
+}
+
+function normalizeContext(context: CreateRunInput["context"]): ContextItem[] {
+  return (context ?? []).map((item) => {
+    if (typeof item === "string") {
+      return { source: "user", content: item, priority: 50, sensitive: false };
+    }
+    return {
+      source: item.source ?? "user",
+      content: item.content,
+      priority: item.priority ?? 50,
+      sensitive: item.sensitive ?? false
+    };
+  });
+}
+
+function trimContext(context: ContextItem[], tokenBudget: number): ContextItem[] {
+  const sorted = [...context].sort((a, b) => b.priority - a.priority);
+  const selected: ContextItem[] = [];
+  let used = 0;
+  for (const item of sorted) {
+    const cost = estimateTokens(item.content);
+    if (used + cost > tokenBudget) continue;
+    selected.push(item);
+    used += cost;
+  }
+  return selected.sort((a, b) => a.priority - b.priority);
 }

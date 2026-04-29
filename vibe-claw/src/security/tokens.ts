@@ -1,16 +1,20 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { newId, nowIso } from "../core/ids.js";
 import type { ApiToken, AuthActor } from "../types.js";
-import type { MemoryStore } from "../store/memory-store.js";
+import type { Store } from "../store/store.js";
 
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export class TokenRegistry {
-  constructor(private readonly store: MemoryStore) {}
+export function createPlainToken(): string {
+  return `vcl_${randomBytes(24).toString("base64url")}`;
+}
 
-  registerPlainToken(name: string, token: string, scopes: string[] = ["*"]): ApiToken {
+export class TokenRegistry {
+  constructor(private readonly store: Store) {}
+
+  async registerPlainToken(name: string, token: string, scopes: string[] = ["*"]): Promise<ApiToken> {
     return this.store.addToken({
       id: newId("token"),
       tokenHash: hashToken(token),
@@ -22,9 +26,16 @@ export class TokenRegistry {
     });
   }
 
-  authenticate(token: string, requiredScope: string): AuthActor | null {
+  async createToken(name: string, scopes: string[]): Promise<{ token: ApiToken; plainToken: string }> {
+    const plainToken = createPlainToken();
+    const token = await this.registerPlainToken(name, plainToken, scopes);
+    return { token, plainToken };
+  }
+
+  async authenticate(token: string, requiredScope: string): Promise<AuthActor | null> {
     const incoming = Buffer.from(hashToken(token));
-    const matched = this.store.listTokens().find((candidate) => {
+    const tokens = await this.store.listTokens();
+    const matched = tokens.find((candidate) => {
       const expected = Buffer.from(candidate.tokenHash);
       return expected.length === incoming.length && timingSafeEqual(expected, incoming);
     });

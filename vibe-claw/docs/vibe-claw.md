@@ -744,3 +744,35 @@ Vibe IM 不应该：
 - Vibe IM 通过公开 API 同步 Agent 列表回归。
 - Vibe IM 与 Agent 单聊消息闭环回归。
 - Agent 状态事件、正在输入和模型交互阶段展示回归。
+
+工作规则：
+1. 先扫描需求文档，生成 TODO_CHECKLIST.md。
+2. 每个需求拆成可验证任务，标记：
+   - 未开始
+   - 开发中
+   - 已完成
+   - 已验证
+3. 不允许在所有任务“已验证”前停止。
+4. 每完成一个模块，必须：
+   - 实现代码
+   - 自测
+   - 修复报错
+   - 更新 TODO_CHECKLIST.md
+5. 如果发现需求不清楚，不要停止等待我确认，按最合理方案实现，并在 ASSUMPTIONS.md 记录假设。
+6. 如果遇到技术阻塞，不要停止，必须先尝试至少 3 种方案，并记录在 BLOCKERS.md。
+7. 最终停止条件只有一个：
+   - 所有需求完成
+   - 所有测试通过
+   - 无 TypeScript / lint / build 错误
+   - 生成 FINAL_REPORT.md
+
+交付前必须执行：
+
+npm install
+npm run lint
+npm run typecheck
+npm run build
+npm test
+
+如果项目没有这些命令，请先检查 package.json，使用现有等价命令。
+如果缺少测试，请为核心逻辑补充最小可用测试。
