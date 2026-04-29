@@ -1,0 +1,8 @@
+.next
+node_modules
+data
+uploads
+.env
+**/.env
+**/.env.*
+.DS_Store

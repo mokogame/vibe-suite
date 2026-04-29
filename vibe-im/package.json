@@ -1,0 +1,12 @@
+{
+  "name": "vibe-im-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix app run dev",
+    "build": "npm --prefix app run build",
+    "start": "npm --prefix app run start",
+    "lint": "npm --prefix app run lint",
+    "db:migrate": "npm --prefix app run db:migrate",
+    "db:healthcheck": "npm --prefix app run db:healthcheck"
+  }
+}

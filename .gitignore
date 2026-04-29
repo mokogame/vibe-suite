@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+.next/
+.next-dev/
+.next-build/
+dist/
+coverage/
+
+# Runtime data
+uploads/
+data/
+*.log
+
+# Local env
+.env
+.env.local
+.env.*
+**/.env
+**/.env.*

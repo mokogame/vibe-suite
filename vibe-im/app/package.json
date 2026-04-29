@@ -1,0 +1,25 @@
+{
+  "name": "vibe-im",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "NEXT_DIST_DIR=.next-dev node scripts/dev-server.mjs",
+    "dev:server": "NEXT_DIST_DIR=.next-dev node --watch-path=server.mjs --watch-path=lib server.mjs",
+    "build": "NEXT_DIST_DIR=.next-build next build",
+    "start": "NODE_ENV=production NEXT_DIST_DIR=.next-build node server.mjs",
+    "lint": "next lint",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "db:healthcheck": "node scripts/db-healthcheck.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.3.0",
+    "libpq": "^1.10.0",
+    "lucide-react": "^0.468.0",
+    "next": "^14.2.23",
+    "pg": "^8.20.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "redis": "^4.7.1",
+    "ws": "^8.18.0"
+  }
+}
